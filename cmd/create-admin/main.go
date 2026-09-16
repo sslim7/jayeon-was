@@ -71,6 +71,7 @@ import (
 	"cloud.google.com/go/firestore"
 
 	"github.com/sslim7/jayeon-was/internal/admin"
+	"github.com/sslim7/jayeon-was/internal/credentials"
 )
 
 func main() {
@@ -98,7 +99,7 @@ func main() {
 
 	// 입력 검증은 Firestore 에 붙기 전에 끝낸다. 연결부터 하고 나서 "이름이 비었다" 로
 	// 죽으면 자격증명이 없는 자리에서는 무엇이 틀렸는지조차 알 수 없다.
-	normalized := admin.NormalizeEmail(*email)
+	normalized := credentials.NormalizeEmail(*email)
 	if normalized == "" {
 		log.Fatal("-email 이 필요하다")
 	}
@@ -162,7 +163,7 @@ func main() {
 		log.Fatalf("기존 계정 확인 실패: %v", err)
 	}
 
-	hash, err := admin.HashPassword(*password)
+	hash, err := credentials.HashPassword(*password)
 	if err != nil {
 		log.Fatalf("비밀번호 해시 실패: %v", err)
 	}

@@ -11,7 +11,7 @@ info:
     이 파일은 `//go:embed docs/openapi.yaml` 로 바이너리에 박혀 `GET /openapi.yaml` 로
     그대로 나가고, `GET /docs` 의 Swagger UI 가 이것을 읽는다. **파일이 없으면 빌드가 깨진다.**
 
-    지금은 골격만 있다. 어드민 인증 경로는 형태만 적어 둔 스텁이며, 요청·응답 스키마의
+    사용자 인증은 초대 전용 이메일·비밀번호 방식이다. 어드민 경로는 스텁이며, 요청·응답 스키마의
     정본은 `internal/admin` 의 핸들러다 — 여기에 상세를 지어 넣으면 구현과 어긋난다.
 
 servers:
@@ -49,6 +49,116 @@ paths:
             text/plain:
               schema: { type: string }
               example: firestore unavailable
+
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: 초대 계정 로그인
+      operationId: userLogin
+      description: 계정 없음과 비밀번호 불일치는 동일한 INVALID_CREDENTIALS 응답이다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 로그인 성공. 첫 로그인에서는 비밀번호 변경이 필요하다.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/TokenSet'
+                  - type: object
+                    required: [mustChangePassword]
+                    properties:
+                      mustChangePassword: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      summary: 사용자 토큰 재발급
+      operationId: refreshUserTokens
+      description: |
+        리프레시 토큰의 버전과 계정의 현재 버전을 대조한다.
+        비밀번호 변경 이전에 발급한 리프레시 토큰은 401로 거절한다.
+        재발급 자체가 이전 리프레시 토큰을 폐기하지는 않는다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: 새 토큰 세트 (mustChangePassword 필드는 없음)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenSet' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/change-password:
+    post:
+      tags: [auth]
+      summary: 사용자 비밀번호 변경
+      operationId: changeUserPassword
+      description: |
+        새 비밀번호는 8자 이상, UTF-8 기준 72바이트 이하여야 하며 현재 비밀번호와 달라야 한다.
+        해시 교체, 토큰 버전 증가, mustChangePassword 해제를 함께 저장한다.
+        기존 리프레시 토큰은 무효가 되므로 변경 후 다시 로그인한다.
+        이미 발급한 액세스 토큰은 최대 1시간 더 유효하다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password }
+                newPassword: { type: string, format: password, minLength: 8 }
+      responses:
+        '204': { description: 변경 완료 (본문 없음) }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: UNAUTHORIZED (미인증) 또는 INVALID_CREDENTIALS (현재 비밀번호 불일치)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /users/me:
+    get:
+      tags: [users]
+      summary: 로그인한 사용자 프로필
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: 비밀번호 변경 필요 여부의 정본
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserProfile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/InternalError' }
 
   # ──────────────────────────────────────────────────────────────
   # 어드민 — 스텁. 정본은 internal/admin 이다.
@@ -135,6 +245,10 @@ paths:
         '500': { $ref: '#/components/responses/InternalError' }
 
 tags:
+  - name: auth
+    description: 초대 전용 사용자 인증. 공개 가입과 비밀번호 찾기 API는 제공하지 않는다.
+  - name: users
+    description: 사용자 프로필
   - name: admin
     description: 어드민 인증과 계정·감사 로그. `ADMIN_JWT_SECRET` 이 없으면 라우트가 아예 걸리지 않는다
 
@@ -150,6 +264,18 @@ components:
         파싱되므로 서버가 기동을 거부한다.
 
   responses:
+    InvalidCredentials:
+      description: 이메일 또는 비밀번호 불일치
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: INVALID_CREDENTIALS, message: 이메일 또는 비밀번호가 맞지 않아요 }
+    AccountDisabled:
+      description: 비활성 계정
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: ACCOUNT_DISABLED, message: 사용할 수 없는 계정이에요 }
     BadRequest:
       description: 요청 형식 또는 값 검증 실패
       content:
@@ -170,6 +296,22 @@ components:
           example: { code: INTERNAL_ERROR, message: 서버 오류가 생겼어요 }
 
   schemas:
+    TokenSet:
+      type: object
+      required: [accessToken, refreshToken, expiresInSec]
+      properties:
+        accessToken: { type: string, description: 1시간 유효한 액세스 토큰 }
+        refreshToken: { type: string, description: 90일 유효한 리프레시 토큰 }
+        expiresInSec: { type: integer, example: 3600 }
+    UserProfile:
+      type: object
+      required: [userId, email, userName, mustChangePassword, createdAt]
+      properties:
+        userId: { type: string }
+        email: { type: string, format: email }
+        userName: { type: string }
+        mustChangePassword: { type: boolean }
+        createdAt: { $ref: '#/components/schemas/Timestamp' }
     # ---------- 공통 ----------
     # 이 스키마는 Go 의 httpx.Error 와 **1:1 대응한다**(internal/httpx/httpx.go).
     # 필드 이름이나 형태가 한쪽만 바뀌면 SPA 가 에러 본문을 못 읽어 모든 실패가
@@ -183,7 +325,9 @@ components:
           description: |
             기계 판독용 에러 코드. 클라이언트는 이 값으로 분기하고 `message` 는 그대로 표시한다.
             공통 코드는 `VALIDATION_FAILED` · `UNAUTHORIZED` · `INTERNAL_ERROR` 이며,
-            도메인별 코드는 각 핸들러가 더한다.
+            사용자 인증은 `INVALID_CREDENTIALS` · `ACCOUNT_DISABLED`를 더한다.
+            `TOO_MANY_ATTEMPTS`는 향후 시도 제한용 429 예약 코드다. 현재 제한은 구현하지 않았으며,
+            구현 시 `details`에 남은 초를 담는다.
           example: VALIDATION_FAILED
         message:
           type: string

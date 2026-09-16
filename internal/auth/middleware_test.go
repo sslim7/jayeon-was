@@ -14,7 +14,7 @@ func TestMiddleware(t *testing.T) {
 		t.Fatalf("발급 실패: %v", err)
 	}
 	// 리프레시 토큰은 Bearer 자리에서 무효여야 한다.
-	refresh, err := issuer.IssueRefresh("user-1")
+	refresh, err := issuer.IssueRefresh("user-1", 0)
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}

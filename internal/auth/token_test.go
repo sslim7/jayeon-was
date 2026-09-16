@@ -18,7 +18,7 @@ func TestTokenIssueParseRoundTrip(t *testing.T) {
 		subject string
 	}{
 		{"access", issuer.IssueAccess, TokenUseAccess, "user-1"},
-		{"refresh", issuer.IssueRefresh, TokenUseRefresh, "user-1"},
+		{"refresh", func(id string) (string, error) { return issuer.IssueRefresh(id, 0) }, TokenUseRefresh, "user-1"},
 	}
 
 	for _, tc := range cases {
@@ -147,5 +147,44 @@ func TestTokenRejectsEmptySubject(t *testing.T) {
 func TestTokenTTLs(t *testing.T) {
 	if RefreshTokenTTL <= AccessTokenTTL {
 		t.Fatalf("리프레시 토큰은 액세스 토큰보다 길어야 한다")
+	}
+}
+
+func TestRefreshVersionAndUniqueID(t *testing.T) {
+	issuer := NewTokenIssuer("test-secret")
+	issuer.now = func() time.Time { return time.Unix(1800000000, 0) }
+	a, err := issuer.IssueRefresh("user-1", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := issuer.IssueRefresh("user-1", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("같은 초에 새 리프레시 토큰을 발급하지 않았다")
+	}
+	id, ver, err := issuer.ParseRefresh(a)
+	if err != nil || id != "user-1" || ver != 7 {
+		t.Fatal(id, ver, err)
+	}
+	access, err := issuer.IssueAccess("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := issuer.parse(access, TokenUseAccess)
+	if err != nil || c.Ver != 0 {
+		t.Fatal(c, err)
+	}
+}
+
+func TestTokenRequiresExpiration(t *testing.T) {
+	issuer := NewTokenIssuer("test-secret")
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{RegisteredClaims: jwt.RegisteredClaims{Subject: "user-1"}, TokenUse: TokenUseAccess}).SignedString(issuer.secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuer.Parse(token, TokenUseAccess); !errors.Is(err, ErrInvalidToken) {
+		t.Fatal("만료 없는 토큰을 허용했다", err)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/sslim7/jayeon-was/internal/admin"
 	"github.com/sslim7/jayeon-was/internal/auth"
+	"github.com/sslim7/jayeon-was/internal/users"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -116,6 +117,8 @@ func main() {
 	// Bearer 액세스 토큰을 파싱해 사용자 ID 를 주입하는 미들웨어의 발급자.
 	// 401 판정은 미들웨어가 아니라 핸들러 몫이다 — 인증 없이 열리는 경로가 섞여 있다.
 	tokens := auth.NewTokenIssuer(jwtSecret)
+	auth.Register(mux, users.NewStore(client), tokens)
+	users.Register(mux, client)
 
 	// 어드민 API. ADMIN_JWT_SECRET 이 없으면 라우트를 하나도 걸지 않고 (nil, nil) 이다 —
 	// 어드민 키 하나 때문에 사용자 앱까지 죽을 이유가 없다(internal/admin.Register).

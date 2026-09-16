@@ -3,11 +3,10 @@ package admin
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/sslim7/jayeon-was/internal/credentials"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -35,17 +34,6 @@ var ErrNotFound = errors.New("admin: 대상을 찾을 수 없다")
 
 // ErrEmailTaken 은 그 이메일을 이미 다른 어드민이 쓰고 있다는 뜻이다.
 var ErrEmailTaken = errors.New("admin: 이미 쓰이는 이메일")
-
-// dummyPasswordHash 는 **없는 계정에 대해서도 bcrypt 비교를 한 번 돌리기 위한** 미끼다.
-//
-// 계정이 없을 때 즉시 401 을 돌려주면 응답이 수십 밀리초 빨라진다. bcrypt 는 일부러
-// 느리게 설계된 함수라 그 차이가 밖에서 또렷하게 보이고, 그러면 로그인 API 하나로
-// "이 이메일이 어드민으로 등록돼 있는가" 를 훑어낼 수 있다. 어드민 이메일 목록은
-// 표적 피싱의 출발점이므로 그 정보를 시간으로 흘리지 않는다.
-//
-// 아무 비밀번호와도 맞지 않는 임의 값의 해시다(cost 는 bcrypt.DefaultCost = 10 으로
-// 실제 계정과 같아야 소요 시간이 같다).
-const dummyPasswordHash = "$2a$10$KcFvHV9FpL6YiD8PfrNs9esrwER0RrgDqXbg6fe5lx2ILe28BuNsq"
 
 // Admin 은 어드민 계정 한 건이다.
 //
@@ -111,37 +99,8 @@ type Store struct {
 
 func NewStore(fs *firestore.Client) *Store { return &Store{fs: fs} }
 
-// NormalizeEmail 은 저장·조회에 쓰는 이메일 표준형이다.
-//
-// 소문자로 눕히고 앞뒤 공백을 턴다. 저장할 때와 로그인할 때 **반드시 같은 함수를**
-// 거쳐야 한다 — 대문자로 만든 계정에 소문자로 로그인하면 "등록된 어드민 계정이
-// 아닙니다" 가 나오는데, 콘솔에서 문서를 보면 멀쩡히 있어서 원인을 찾기 어렵다.
-func NormalizeEmail(email string) string {
-	return strings.ToLower(strings.TrimSpace(email))
-}
-
-// HashPassword 는 비밀번호를 bcrypt 해시로 바꾼다.
-//
-// bcrypt 는 **72바이트를 넘는 입력을 조용히 자르지 않고 에러를 낸다**(x/crypto v0.53).
-// 그래서 호출부가 길이를 미리 막지 않아도 여기서 걸린다.
-func HashPassword(plain string) (string, error) {
-	h, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	return string(h), nil
-}
-
-// VerifyPassword 는 해시와 평문이 맞는지 본다.
-//
-// hash 가 비어 있으면 dummyPasswordHash 로 비교한다 — 계정이 없는 경우에도 호출부가
-// 같은 코드를 지나가게 해서 응답 시간으로 가입 여부가 새지 않게 한다.
-func VerifyPassword(hash, plain string) bool {
-	if hash == "" {
-		hash = dummyPasswordHash
-	}
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
-}
+// 자격증명 처리는 internal/credentials가 맡는다. 미끼 해시를 두 벌로 두면
+// 한쪽에서 계정 열거 방어가 사라져도 다른 쪽 테스트로 드러나지 않는다.
 
 // FindByEmail 은 로그인용 조회다. email 은 호출부가 NormalizeEmail 을 거친 값이어야 한다.
 //
@@ -200,7 +159,7 @@ func (s *Store) List(ctx context.Context) ([]Admin, error) {
 // 계정 문서와 이메일 락 문서를 **한 트랜잭션에서** 쓴다(EmailLockCollection 주석 참고).
 // 락만 남고 계정이 없거나 그 반대인 상태가 생기면 그 이메일은 영영 쓸 수 없게 된다.
 func (s *Store) Create(ctx context.Context, a Admin) (string, error) {
-	email := NormalizeEmail(a.Email)
+	email := credentials.NormalizeEmail(a.Email)
 	if email == "" {
 		return "", errors.New("admin: 이메일이 비어 있다")
 	}

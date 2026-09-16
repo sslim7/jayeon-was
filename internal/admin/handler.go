@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sslim7/jayeon-was/internal/credentials"
 	"github.com/sslim7/jayeon-was/internal/httpx"
 )
 
@@ -120,7 +121,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := NormalizeEmail(req.Email)
+	email := credentials.NormalizeEmail(req.Email)
 	if email == "" || req.Password == "" {
 		httpx.WriteError(rec, http.StatusBadRequest, codeValidation, "이메일과 비밀번호를 입력해 주세요")
 		h.recordLogin(r, rec, Admin{}, email, raw, false)
@@ -139,8 +140,8 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	// 🔴 **계정이 없어도 비밀번호 비교를 반드시 한 번 돌린다.** 없을 때 곧장 401 을
 	// 돌려주면 bcrypt 한 번(수십 ms)이 통째로 빠져 응답 시간이 눈에 띄게 빨라지고,
 	// 그 차이만으로 "이 이메일이 어드민인가" 를 밖에서 훑어낼 수 있다.
-	// VerifyPassword 는 해시가 비면 미끼 해시로 비교한다(store.go dummyPasswordHash).
-	ok := VerifyPassword(found.PasswordHash, req.Password)
+	// VerifyPassword 는 해시가 비면 미끼 해시로 비교한다(internal/credentials).
+	ok := credentials.VerifyPassword(found.PasswordHash, req.Password)
 
 	// 🔴 **계정이 없을 때와 비밀번호가 틀릴 때의 응답이 글자 하나까지 같아야 한다.**
 	// 바로 위의 미끼 해시와 아래의 비활성 판정 순서는 둘 다 "이 이메일이 어드민인가" 를
@@ -242,12 +243,12 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request, c *Clai
 		httpx.WriteError(w, http.StatusInternalServerError, codeInternal, msgInternal)
 		return
 	}
-	if VerifyPassword(current.PasswordHash, req.NewPassword) {
+	if credentials.VerifyPassword(current.PasswordHash, req.NewPassword) {
 		httpx.WriteError(w, http.StatusBadRequest, codeValidation, "기존 비밀번호와 다른 비밀번호를 입력해 주세요")
 		return
 	}
 
-	hash, err := HashPassword(req.NewPassword)
+	hash, err := credentials.HashPassword(req.NewPassword)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, codeValidation, "사용할 수 없는 비밀번호예요")
 		return
@@ -325,7 +326,7 @@ func (h *Handler) createAdmin(w http.ResponseWriter, r *http.Request, _ *Claims)
 		return
 	}
 
-	email := NormalizeEmail(req.Email)
+	email := credentials.NormalizeEmail(req.Email)
 	if msg := validateEmail(email); msg != "" {
 		httpx.WriteError(w, http.StatusBadRequest, codeValidation, msg)
 		return
@@ -340,7 +341,7 @@ func (h *Handler) createAdmin(w http.ResponseWriter, r *http.Request, _ *Claims)
 		return
 	}
 
-	hash, err := HashPassword(req.Password)
+	hash, err := credentials.HashPassword(req.Password)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, codeValidation, "사용할 수 없는 비밀번호예요")
 		return
@@ -472,7 +473,7 @@ func (h *Handler) patchAdmin(w http.ResponseWriter, r *http.Request, c *Claims) 
 			httpx.WriteError(w, http.StatusBadRequest, codeValidation, msg)
 			return
 		}
-		hash, err := HashPassword(*req.Password)
+		hash, err := credentials.HashPassword(*req.Password)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, codeValidation, "사용할 수 없는 비밀번호예요")
 			return

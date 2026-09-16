@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"github.com/sslim7/jayeon-was/internal/credentials"
 )
 
 // 이 파일은 실제 Firestore 에뮬레이터를 상대로 도는 통합 테스트다.
@@ -67,7 +68,7 @@ func postLogin(t *testing.T, h *Handler, email, password string) (int, string) {
 // 🔴 없는 이메일로 로그인한 응답과, 있는 이메일에 틀린 비밀번호로 로그인한 응답이
 // **바이트 단위로 같아야 한다.** 하나라도 갈리면 어드민 이메일 목록을 밖에서 훑을 수 있다.
 //
-// store.go 의 미끼 해시(dummyPasswordHash)는 두 경로의 **응답 시간**을 맞추려고 있고,
+// internal/credentials 의 미끼 해시(dummyHash)는 두 경로의 **응답 시간**을 맞추려고 있고,
 // handler.go 가 비활성 판정을 비밀번호 확인 뒤에 두는 것도 같은 목적이다. 그런데 문구를
 // 갈라 놓으면 그 둘이 통째로 무의미해진다 — 시간을 잴 것도 없이 본문이 알려 주기 때문이다.
 // 실제로 형제 프로젝트 birdieup-was 가 "등록된 어드민 계정이 아닙니다" 와
@@ -79,8 +80,8 @@ func TestLoginDoesNotRevealWhetherAccountExists(t *testing.T) {
 	ctx := context.Background()
 
 	// 존재하는 계정 하나를 만든다. 이메일은 테스트마다 달라야 다른 실행과 부딪히지 않는다.
-	email := NormalizeEmail("enum-probe-" + time.Now().Format("20060102150405.000000") + "@jayeon.kr")
-	hash, err := HashPassword("correct-password-1234")
+	email := credentials.NormalizeEmail("enum-probe-" + time.Now().Format("20060102150405.000000") + "@jayeon.kr")
+	hash, err := credentials.HashPassword("correct-password-1234")
 	if err != nil {
 		t.Fatalf("비밀번호 해싱 실패: %v", err)
 	}
@@ -120,8 +121,8 @@ func TestLoginInactiveAccountNeedsCorrectPassword(t *testing.T) {
 	ctx := context.Background()
 
 	const password = "correct-password-1234"
-	email := NormalizeEmail("inactive-probe-" + time.Now().Format("20060102150405.000000") + "@jayeon.kr")
-	hash, err := HashPassword(password)
+	email := credentials.NormalizeEmail("inactive-probe-" + time.Now().Format("20060102150405.000000") + "@jayeon.kr")
+	hash, err := credentials.HashPassword(password)
 	if err != nil {
 		t.Fatalf("비밀번호 해싱 실패: %v", err)
 	}
