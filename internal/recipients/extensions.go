@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -111,7 +110,7 @@ func parseXLSX(data []byte) (out []ImportRow, err error) {
 		switch h {
 		case "이름", "name":
 			key = "name"
-		case "전화번호", "phone":
+		case "전화번호", "연락처", "phone":
 			key = "phone"
 		case "그룹", "groupId":
 			key = "groupId"
@@ -128,7 +127,7 @@ func parseXLSX(data []byte) (out []ImportRow, err error) {
 	if len(extra) > 20 {
 		return nil, messaging.ErrInvalid
 	}
-	for _, key := range []string{"name", "phone", "groupId"} {
+	for _, key := range []string{"name", "phone"} {
 		if _, ok := cols[key]; !ok {
 			return nil, messaging.ErrInvalid
 		}
@@ -176,9 +175,6 @@ func parseXLSX(data []byte) (out []ImportRow, err error) {
 		}
 		r := ImportRow{CustomFields: fields, Row: rowNo, Name: in.Name, Phone: in.Phone, GroupID: in.GroupID, Status: "ADD"}
 		in, e = validate(in)
-		if e == nil && in.GroupID == "" {
-			e = fmt.Errorf("그룹은 필수입니다.")
-		}
 		if e != nil {
 			r.Status = "EXCLUDED"
 			r.Reason = e.Error()
@@ -272,9 +268,6 @@ func (s *Store) Confirm(ctx context.Context, uid, id string) (Import, error) {
 				continue
 			}
 			in, validationErr := validate(Input{Name: r.Name, Phone: r.Phone, GroupID: r.GroupID, CustomFields: r.CustomFields})
-			if validationErr == nil && in.GroupID == "" {
-				validationErr = fmt.Errorf("그룹은 필수입니다.")
-			}
 			if validationErr != nil {
 				r.Status = "EXCLUDED"
 				r.Reason = "확정 시 검증 실패: " + validationErr.Error()

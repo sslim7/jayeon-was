@@ -10,12 +10,12 @@ import (
 )
 
 func TestCustomColumnsMandatoryAndPreserve(t *testing.T) {
-	data := workbook(t, [][]any{{"이름", "전화번호", "그룹", "직함", "이메일"}, {"홍길동", "01012345678", "가족", "  회장  ", "a@example.com"}, {"제외", "01011112222", "", "", ""}})
+	data := workbook(t, [][]any{{"이름", "전화번호", "그룹", "직함", "이메일"}, {"홍길동", "01012345678", "가족", "  회장  ", "a@example.com"}, {"", "01011112222", "", "", ""}})
 	rows, e := parseXLSX(data)
 	if e != nil || len(rows) != 2 || len(rows[0].CustomFields) != 2 || rows[0].CustomFields[0].Value != "  회장  " || rows[1].Status != "EXCLUDED" {
 		t.Fatal(rows, e)
 	}
-	for _, head := range [][]any{{"이름", "전화번호"}, {"이름", "전화번호", "그룹", "추가", "추가"}, {"이름", "전화번호", "그룹", "", "값"}, {"이름", "name", "전화번호", "그룹"}} {
+	for _, head := range [][]any{{"전화번호", "그룹"}, {"이름", "그룹"}, {"이름", "전화번호", "그룹", "추가", "추가"}, {"이름", "전화번호", "그룹", "", "값"}, {"이름", "name", "전화번호", "그룹"}} {
 		if _, e = parseXLSX(workbook(t, [][]any{head, {"A", "01012345678", "B", "C", "D"}})); e == nil {
 			t.Fatal("잘못된 헤더허용", head)
 		}
@@ -127,15 +127,50 @@ func TestConfirmRevalidatesLegacyPreview(t *testing.T) {
 		t.Fatal(e)
 	}
 	out, e := s.Confirm(ctx, uid, legacy.ID)
-	if e != nil || out.AddedCount != 1 || out.ExcludedCount != 5 {
+	if e != nil || out.AddedCount != 2 || out.ExcludedCount != 4 {
 		t.Fatal(out, e)
 	}
 	page, e := s.List(ctx, uid, "", "", "", 100)
-	if e != nil || len(page.Items) != 1 || page.Items[0].Phone != "01055556666" {
+	if e != nil || len(page.Items) != 2 || page.Items[0].Phone != "01011112222" || page.Items[0].GroupID != "" || page.Items[1].Phone != "01055556666" {
 		t.Fatal(page, e)
 	}
 	again, e := s.Confirm(ctx, uid, legacy.ID)
-	if e != nil || again.AddedCount != 1 || again.ExcludedCount != 5 {
+	if e != nil || again.AddedCount != 2 || again.ExcludedCount != 4 {
 		t.Fatal(again, e)
+	}
+}
+
+func TestExcelPhoneAliasesAndOptionalGroup(t *testing.T) {
+	for _, phoneHeader := range []string{"전화번호", "연락처", "phone"} {
+		for _, withGroup := range []bool{false, true} {
+			head := []any{"이름", phoneHeader, "직함"}
+			row := []any{"홍길동", "010-1234-5678", "  회장  "}
+			if withGroup {
+				head = append(head, "그룹")
+				row = append(row, "")
+			}
+			rows, e := parseXLSX(workbook(t, [][]any{head, row}))
+			if e != nil || len(rows) != 1 || rows[0].Status != "ADD" || rows[0].Phone != "01012345678" || rows[0].GroupID != "" || len(rows[0].CustomFields) != 1 || rows[0].CustomFields[0].Name != "직함" || rows[0].CustomFields[0].Value != "  회장  " {
+				t.Fatal(phoneHeader, withGroup, rows, e)
+			}
+		}
+	}
+	if _, e := parseXLSX(workbook(t, [][]any{{"이름", "전화번호", "연락처"}, {"홍길동", "01012345678", "01099998888"}})); e == nil {
+		t.Fatal("전화번호 별칭 중복 허용")
+	}
+	s, uid := testStore(t)
+	ctx := context.Background()
+	data := workbook(t, [][]any{{"이름", "연락처", "주소"}, {"홍길동", "010-1234-5678", "서울"}, {"파일중복", "01012345678", "부산"}, {"자리수오류", "0101234567", ""}})
+	p, e := s.Preview(ctx, uid, messaging.Upload{Name: "그룹없는연락처.xlsx", DataBase64: base64.StdEncoding.EncodeToString(data)})
+	if e != nil || p.AddedCount != 1 || p.ExcludedCount != 2 {
+		t.Fatal(p, e)
+	}
+	confirmed, e := s.Confirm(ctx, uid, p.ID)
+	if e != nil || confirmed.AddedCount != 1 {
+		t.Fatal(confirmed, e)
+	}
+	page, e := s.List(ctx, uid, "", "", "", 50)
+	if e != nil || len(page.Items) != 1 || page.Items[0].GroupID != "" || page.Items[0].CustomFields[0].Value != "서울" {
+		t.Fatal(page, e)
 	}
 }

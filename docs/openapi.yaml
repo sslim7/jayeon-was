@@ -291,7 +291,7 @@ paths:
     post:
       tags:
       - messaging
-      summary: xlsx 2MiB 200행 사전검증 이름 전화번호 그룹
+      summary: xlsx 2MiB 200행 사전검증 이름과 전화번호 또는 연락처 필수, 그룹 선택
       responses:
         '200':
           description: 성공
