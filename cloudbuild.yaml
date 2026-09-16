@@ -1,0 +1,71 @@
+# jayeon WAS(jayeon-api.redhead.kr) — Cloud Run 배포 파이프라인
+# 수동 실행: gcloud builds submit --config cloudbuild.yaml
+#
+# 이 레포의 기본 브랜치는 staging 입니다. 브랜치 푸시로는 배포되지 않습니다.
+# 배포 방아쇠는 v* 태그입니다 — staging 에서 작업하고 release 에 머지한 뒤 `v1.2.3` 같은
+# 태그를 푸시하면 GCP Cloud Build 트리거(패턴 ^v.*$)가 이 파일을 돌립니다.
+# 트리거 정의는 이 레포가 아니라 GCP 쪽에 있고, 거기서 substitutions 를 덮어쓸 수 있습니다.
+# GitHub Actions 는 쓰지 않습니다.
+
+# GCP 프로젝트는 redhead 이고, Artifact Registry 저장소 이름도 프로젝트명과 같은 redhead 입니다.
+# 최종 이미지 경로: asia-northeast3-docker.pkg.dev/redhead/redhead/jayeon-was
+#
+# 🔴 _SERVICE 는 Terraform 이 만든 Cloud Run 서비스 이름과 정확히 같아야 합니다.
+#    어긋나면 `gcloud run deploy` 가 기존 서비스를 고치는 대신 **그 이름으로 엉뚱한 서비스를
+#    새로 만듭니다.** 배포는 성공으로 끝나는데 도메인이 가리키는 서비스는 옛 이미지 그대로라,
+#    "배포했는데 아무것도 안 바뀐다" 로 나타납니다.
+substitutions:
+  _REGION: asia-northeast3
+  _REPO: redhead           # Artifact Registry 저장소 (프로젝트명과 같다)
+  _SERVICE: jayeon-was     # Cloud Run 서비스 (Terraform 이 만든 이름과 일치해야 한다)
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}"]
+
+  # 🔴 이 단계는 "이미지 교체"만 합니다. 환경변수·시크릿·CPU·min-instances·
+  #    --allow-unauthenticated 같은 서비스 설정 플래그를 여기에 넣지 마십시오.
+  #    그 설정들의 소유자는 Terraform(redhead-terraform)입니다. CI 가 같이 넘기면
+  #    배포할 때마다 Terraform 이 만든 값을 CI 가 덮고, 다음 apply 에서 Terraform 이 되돌리는
+  #    핑퐁이 생깁니다. 실제 증상은 "배포 후 환경변수가 사라져 기동 실패" 로 나타납니다.
+  #    설정을 바꿔야 하면 Terraform 쪽을 고쳐서 apply 하십시오.
+  #    (Terraform 은 image 를 lifecycle.ignore_changes 로 빼 두므로 반대 방향 충돌은 없습니다.)
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+
+# latest 는 사람이 보기 편하라고 두는 것이고, 롤백 대상을 특정하는 것은 $COMMIT_SHA 태그입니다.
+# latest 만 있으면 "어느 이미지로 되돌릴지"를 지목할 수 없습니다.
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+# 커스텀 서비스 계정으로 도는 빌드는 기본 로그 버킷에 쓸 권한이 없어,
+# 이 옵션이 없으면 빌드가 시작하자마자 로그 버킷/스토리지 소스 해석 오류로 실패합니다.
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# 테스트 단계는 일부러 넣지 않았습니다.
+# 이 레포의 통합 테스트는 Firestore 에뮬레이터를 요구하고, 그 에뮬레이터(firebase-tools)는
+# JDK 21+ 를 요구해 Cloud Build 기본 이미지에서 바로 돌지 않습니다.
+# 붙이려면 golang + JDK 21 + firebase-tools 를 담은 빌더 이미지를 따로 만들어 두고,
+# 그 이미지에서 `firebase emulators:exec --only firestore --project demo-test
+# --config firebase.test.json 'go test ./... -count=1'` 를 build 단계 앞에 추가하면 됩니다.
