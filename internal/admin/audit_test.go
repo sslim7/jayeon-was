@@ -16,7 +16,7 @@ import (
 // 없는 새 필드(oldPassword 등)도 자동으로 가려져야 한다.
 func TestRedact(t *testing.T) {
 	in := map[string]any{
-		"email":        "admin@jayeon.kr",
+		"email":        "admin@nature.kr",
 		"password":     "hunter2",
 		"newPassword":  "hunter3",
 		"passwordHash": "$2a$10$abc",
@@ -33,7 +33,7 @@ func TestRedact(t *testing.T) {
 		},
 	}
 	want := map[string]any{
-		"email":        "admin@jayeon.kr",
+		"email":        "admin@nature.kr",
 		"password":     redactedValue,
 		"newPassword":  redactedValue,
 		"passwordHash": redactedValue,
@@ -170,11 +170,11 @@ func TestAuditLogMatches(t *testing.T) {
 	l := auditLog{
 		Actions:    "POST /admin/admins",
 		AdminName:  "홍길동",
-		AdminEmail: "admin@jayeon.kr",
+		AdminEmail: "admin@nature.kr",
 		IPAddress:  "203.0.113.7",
 		Details:    map[string]any{"body": map[string]any{"name": "김철수"}},
 	}
-	hits := []string{"admins", "POST", "홍길", "jayeon.kr", "203.0", "ADMIN/ADMINS"}
+	hits := []string{"admins", "POST", "홍길", "nature.kr", "203.0", "ADMIN/ADMINS"}
 	for _, needle := range hits {
 		if !l.matches(needle) {
 			t.Errorf("matches(%q) = false, want true", needle)

@@ -1,7 +1,7 @@
 .idea/
 
 # go build 산출물 (모듈명과 같은 이름의 바이너리)
-/jayeon-was
+/nature-was
 
 # 환경변수 (커밋 금지) — 템플릿은 .env.example 참고
 .env
@@ -27,3 +27,6 @@ firebase-export-*/
 
 # 서비스 계정 키 등 자격증명 (커밋 금지)
 secrets/
+
+# 이전 이름으로 생성한 로컬 바이너리도 제외한다.
+/jayeon-was

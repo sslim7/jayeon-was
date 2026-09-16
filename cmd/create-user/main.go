@@ -14,9 +14,9 @@ import (
 
 	"cloud.google.com/go/firestore"
 
-	"github.com/sslim7/jayeon-was/internal/auth"
-	"github.com/sslim7/jayeon-was/internal/credentials"
-	"github.com/sslim7/jayeon-was/internal/users"
+	"github.com/sslim7/nature-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/users"
 )
 
 func main() {

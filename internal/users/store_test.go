@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/sslim7/jayeon-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/auth"
 )
 
 func emulatorStore(t *testing.T) *Store {

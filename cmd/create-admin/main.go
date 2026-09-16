@@ -44,12 +44,12 @@
 //	# 로컬(에뮬레이터) — 무엇을 할지 먼저 본다
 //	GOOGLE_CLOUD_PROJECT=demo-jayeon FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 \
 //	  GOOGLE_APPLICATION_CREDENTIALS= \
-//	  go run ./cmd/create-admin -email admin@jayeon.kr -name 홍길동 -password '초기비밀번호8자이상'
+//	  go run ./cmd/create-admin -email admin@nature.kr -name 홍길동 -password '초기비밀번호8자이상'
 //
 //	# 로컬에 실제로 쓴다
 //	GOOGLE_CLOUD_PROJECT=demo-jayeon FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 \
 //	  GOOGLE_APPLICATION_CREDENTIALS= \
-//	  go run ./cmd/create-admin -email admin@jayeon.kr -name 홍길동 -password '초기비밀번호8자이상' --write
+//	  go run ./cmd/create-admin -email admin@nature.kr -name 홍길동 -password '초기비밀번호8자이상' --write
 //
 //	# 운영에 실제로 쓴다
 //	FIRESTORE_EMULATOR_HOST= GOOGLE_APPLICATION_CREDENTIALS= \
@@ -70,8 +70,8 @@ import (
 
 	"cloud.google.com/go/firestore"
 
-	"github.com/sslim7/jayeon-was/internal/admin"
-	"github.com/sslim7/jayeon-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/admin"
+	"github.com/sslim7/nature-was/internal/credentials"
 )
 
 func main() {

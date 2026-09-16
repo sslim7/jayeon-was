@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sslim7/jayeon-was/internal/httpx"
+	"github.com/sslim7/nature-was/internal/httpx"
 )
 
 // AuthedFunc 는 인증·권한 확인을 통과한 뒤 불리는 핸들러다.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sslim7/jayeon-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/credentials"
 )
 
 // fakeAccounts 는 AccountStore 의 인메모리 구현이다.

@@ -16,9 +16,13 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"github.com/joho/godotenv"
-	"github.com/sslim7/jayeon-was/internal/admin"
-	"github.com/sslim7/jayeon-was/internal/auth"
-	"github.com/sslim7/jayeon-was/internal/users"
+	"github.com/sslim7/nature-was/internal/admin"
+	"github.com/sslim7/nature-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/messaging"
+	"github.com/sslim7/nature-was/internal/recipients"
+	"github.com/sslim7/nature-was/internal/sms"
+	"github.com/sslim7/nature-was/internal/userguard"
+	"github.com/sslim7/nature-was/internal/users"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -32,7 +36,7 @@ const swaggerHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Jayeon API</title>
+  <title>Nature API</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 </head>
 <body>
@@ -119,6 +123,12 @@ func main() {
 	tokens := auth.NewTokenIssuer(jwtSecret)
 	auth.Register(mux, users.NewStore(client), tokens)
 	users.Register(mux, client)
+
+	// 개인정보 도메인은 현재 계정 상태와 임시 비밀번호 변경 여부도 확인한다.
+	domainGuard := userguard.New(users.NewStore(client))
+	recipients.Register(mux, client, domainGuard)
+	sms.Register(mux, client, domainGuard)
+	messaging.Register(mux, client, domainGuard)
 
 	// 어드민 API. ADMIN_JWT_SECRET 이 없으면 라우트를 하나도 걸지 않고 (nil, nil) 이다 —
 	// 어드민 키 하나 때문에 사용자 앱까지 죽을 이유가 없다(internal/admin.Register).

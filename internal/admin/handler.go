@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/sslim7/jayeon-was/internal/credentials"
-	"github.com/sslim7/jayeon-was/internal/httpx"
+	"github.com/sslim7/nature-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/httpx"
 )
 
 const (

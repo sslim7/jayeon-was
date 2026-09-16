@@ -30,7 +30,7 @@ func newTestIssuer(t *testing.T, now time.Time) *TokenIssuer {
 
 var testSubject = Subject{
 	AdminID:            "admin-1",
-	Email:              "admin@jayeon.kr",
+	Email:              "admin@nature.kr",
 	Name:               "홍길동",
 	IsAdmin:            true,
 	Permissions:        map[string]bool{testPermA: true},

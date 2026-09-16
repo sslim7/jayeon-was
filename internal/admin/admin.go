@@ -117,7 +117,7 @@ import (
 
 	"cloud.google.com/go/firestore"
 
-	"github.com/sslim7/jayeon-was/internal/httpx"
+	"github.com/sslim7/nature-was/internal/httpx"
 )
 
 // 메뉴 권한 키 상수가 들어올 자리다. **아직 어드민 메뉴가 하나도 없어서 비어 있다** —

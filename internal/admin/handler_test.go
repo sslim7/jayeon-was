@@ -2,7 +2,7 @@ package admin
 
 import (
 	"encoding/json"
-	"github.com/sslim7/jayeon-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/credentials"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +21,7 @@ const testTarget = "test-domain"
 // 되므로(store.go) `/` 나 공백이 통과하면 잘못된 경로의 문서가 만들어진다.
 func TestValidateEmail(t *testing.T) {
 	ok := []string{
-		"admin@jayeon.kr",
+		"admin@nature.kr",
 		"a.b+tag@sub.example.co.kr",
 		"admin-1_2@example.com",
 	}
@@ -35,12 +35,12 @@ func TestValidateEmail(t *testing.T) {
 		"",
 		"admin",
 		"admin@",
-		"@jayeon.kr",
-		"admin@jayeon",
-		"ad min@jayeon.kr",
-		"admin/x@jayeon.kr", // Firestore 문서 ID 에 쓸 수 없다
+		"@nature.kr",
+		"admin@nature",
+		"ad min@nature.kr",
+		"admin/x@nature.kr", // Firestore 문서 ID 에 쓸 수 없다
 		"admin@jay/eon.kr",
-		"Admin@Jayeon.kr", // NormalizeEmail 을 거치지 않은 값은 거절된다
+		"Admin@Nature.kr", // NormalizeEmail 을 거치지 않은 값은 거절된다
 	}
 	for _, e := range bad {
 		if msg := validateEmail(e); msg == "" {
@@ -49,7 +49,7 @@ func TestValidateEmail(t *testing.T) {
 	}
 
 	// 정규화를 거치면 대문자 주소도 통과해야 한다.
-	if msg := validateEmail(credentials.NormalizeEmail("  Admin@JaYeon.KR ")); msg != "" {
+	if msg := validateEmail(credentials.NormalizeEmail("  Admin@NaTure.KR ")); msg != "" {
 		t.Errorf("정규화한 주소가 거절됐다: %s", msg)
 	}
 }
@@ -80,7 +80,7 @@ func TestToDTOHidesPasswordHash(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	dto := toDTO(Admin{
 		ID:           "admin-1",
-		Email:        "admin@jayeon.kr",
+		Email:        "admin@nature.kr",
 		PasswordHash: "$2a$10$절대나가면안된다",
 		Name:         "홍길동",
 		IsActive:     true,

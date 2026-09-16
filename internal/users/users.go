@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/sslim7/jayeon-was/internal/auth"
-	"github.com/sslim7/jayeon-was/internal/httpx"
+	"github.com/sslim7/nature-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/httpx"
 )
 
 // auth 의 같은 이름 코드와 값이 같아야 한다. 앱은 코드 문자열 하나로 분기하므로,

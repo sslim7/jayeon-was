@@ -1,4 +1,4 @@
-// Package auth 는 **모바일 앱(jayeon-app)이 쓰는 사용자 인증**이다. 어드민 인증은
+// Package auth 는 **모바일 앱(nature-app)이 쓰는 사용자 인증**이다. 어드민 인증은
 // internal/admin 에 따로 있고 토큰도 시크릿도 공유하지 않는다 — 같은 시크릿을 쓰면
 // 어떻게 되는지는 internal/admin/token.go 의 ErrSecretReused 에 적혀 있다.
 //
@@ -20,8 +20,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/sslim7/jayeon-was/internal/credentials"
-	"github.com/sslim7/jayeon-was/internal/httpx"
+	"github.com/sslim7/nature-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/httpx"
 )
 
 const (

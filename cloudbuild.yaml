@@ -1,4 +1,5 @@
-# jayeon WAS(jayeon-api.redhead.kr) — Cloud Run 배포 파이프라인
+# Nature 공개 이름과 달리 운영 Cloud Run 물리 ID는 jayeon-was를 유지한다. Terraform과 함께 별도 이행하기 전 바꾸지 않는다.
+# nature WAS(nature-api.redhead.kr) — Cloud Run 배포 파이프라인
 # 수동 실행: gcloud builds submit --config cloudbuild.yaml
 #
 # 이 레포의 기본 브랜치는 staging 입니다. 브랜치 푸시로는 배포되지 않습니다.
@@ -7,8 +8,8 @@
 # 트리거 정의는 이 레포가 아니라 GCP 쪽에 있고, 거기서 substitutions 를 덮어쓸 수 있습니다.
 # GitHub Actions 는 쓰지 않습니다.
 
-# GCP 프로젝트는 redhead 이고, Artifact Registry 저장소 이름도 프로젝트명과 같은 redhead 입니다.
-# 최종 이미지 경로: asia-northeast3-docker.pkg.dev/redhead/redhead/jayeon-was
+# GCP 프로젝트는 redhead-kr이고 Artifact Registry 저장소는 redhead다.
+# 최종 이미지 경로: asia-northeast3-docker.pkg.dev/redhead-kr/redhead/jayeon-was
 #
 # 🔴 _SERVICE 는 Terraform 이 만든 Cloud Run 서비스 이름과 정확히 같아야 합니다.
 #    어긋나면 `gcloud run deploy` 가 기존 서비스를 고치는 대신 **그 이름으로 엉뚱한 서비스를

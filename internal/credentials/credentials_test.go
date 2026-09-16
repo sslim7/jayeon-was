@@ -39,9 +39,9 @@ func TestVerifyPasswordDummyHash(t *testing.T) {
 // 여기가 갈리면 "콘솔에는 계정이 있는데 로그인은 안 된다" 가 된다.
 func TestNormalizeEmail(t *testing.T) {
 	tests := map[string]string{
-		"Admin@JaYeon.KR": "admin@jayeon.kr",
+		"Admin@NaTure.KR": "admin@nature.kr",
 		"  admin@j.kr  ":  "admin@j.kr",
-		"admin@jayeon.kr": "admin@jayeon.kr",
+		"admin@nature.kr": "admin@nature.kr",
 		"\tADMIN@J.KR\n":  "admin@j.kr",
 	}
 	for in, want := range tests {

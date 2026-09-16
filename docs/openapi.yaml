@@ -1,10 +1,10 @@
 openapi: 3.0.3
 
 info:
-  title: Jayeon API
+  title: Nature API
   version: 0.1.0
   description: |
-    Jayeon 백엔드 API.
+    Nature 백엔드 API.
 
     ## 이 문서의 위치
 
@@ -15,7 +15,7 @@ info:
     정본은 `internal/admin` 의 핸들러다 — 여기에 상세를 지어 넣으면 구현과 어긋난다.
 
 servers:
-  - url: https://jayeon-api.redhead.kr
+  - url: https://nature-api.redhead.kr
     description: 운영
   - url: http://localhost:8091
     description: 로컬 개발 (Firestore 에뮬레이터 연동)
@@ -24,6 +24,937 @@ security:
   - bearerAuth: []
 
 paths:
+  /recipients/{id}/external-sends:
+    post:
+      tags: [recipients]
+      operationId: registerExternalSend
+      summary: 실제 전송 없이 외부 발송일시 1건 등록
+      description: 사용자별 requestId 멱등 처리. 미래 일시 거부. 수신자 집계와 EXTERNAL 이력을 원자적으로 저장한다.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requestId, sentAt]
+              properties:
+                requestId: {type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
+                sentAt: {type: string, format: date-time}
+      responses:
+        '201':
+          description: 외부 발송 등록
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExternalSendResult'}
+        '200':
+          description: 동일 요청의 기존 결과
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExternalSendResult'}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 소유 수신자 없음
+        '409':
+          description: IDEMPOTENCY_CONFLICT 같은 요청 ID의 내용 변경
+  /sms/history:
+    get:
+      tags: [messaging]
+      operationId: listSmsHistory
+      summary: 수신자 이름으로 검색하는 전체 발송이력
+      description: SENT·FAILED 완료 시도와 현재 SENDING 시도. 발송시각 내림차순 후 고유 ID 내림차순. READY 제외. 사용자 및 검색어에 귀속된 커서.
+      parameters:
+        - in: query
+          name: q
+          schema: {type: string, maxLength: 100}
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+        - in: query
+          name: cursor
+          schema: {type: string}
+      responses:
+        '200':
+          description: 최신 발송순 목록
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/RecipientHistory'}
+                  nextCursor: {type: string, nullable: true}
+                  total: {type: integer}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /sms/attachments:
+    post:
+      tags:
+      - messaging
+      summary: JPEG/PNG 업로드 개별300KiB
+      responses:
+        '201':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageAttachment'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageUpload'
+  /sms/attachments/{id}:
+    get:
+      tags:
+      - messaging
+      summary: 첨부 메타데이터
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageAttachment'
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+      - messaging
+      summary: 첨부 논리삭제 기존 스냅샷 유지
+      responses:
+        '204':
+          description: 성공
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+  /sms/attachments/{id}/content:
+    get:
+      tags:
+      - messaging
+      summary: 첨부 원본 JSON
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/MessageAttachment'
+                - type: object
+                  properties:
+                    dataBase64:
+                      type: string
+                      format: byte
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+  /sms/templates:
+    get:
+      tags:
+      - messaging
+      summary: 템플릿 목록
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MessageTemplate'
+                  nextCursor:
+                    type: string
+                    nullable: true
+    post:
+      tags:
+      - messaging
+      summary: 템플릿 등록 최대3개 총600KiB
+      responses:
+        '201':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageTemplate'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageTemplateInput'
+  /sms/templates/{id}:
+    get:
+      tags:
+      - messaging
+      summary: 템플릿 조회
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageTemplate'
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+      - messaging
+      summary: 템플릿 수정
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageTemplate'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageTemplateInput'
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    delete:
+      tags:
+      - messaging
+      summary: 템플릿 삭제
+      responses:
+        '204':
+          description: 성공
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+  /recipients/{id}/history:
+    get:
+      tags:
+      - messaging
+      summary: 수신자 발송이력 최신순
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RecipientHistory'
+                  nextCursor:
+                    type: string
+                    nullable: true
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+  /recipients/imports/preview:
+    post:
+      tags:
+      - messaging
+      summary: xlsx 2MiB 200행 사전검증 이름 전화번호 그룹
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipientImport'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageUpload'
+  /recipients/imports/{id}/confirm:
+    post:
+      tags:
+      - messaging
+      summary: 24시간내 import 확정 중복재검증 멱등
+      responses:
+        '200':
+          description: 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecipientImport'
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+  /recipients:
+    get:
+      tags:
+        - recipients
+      operationId: listRecipients
+      summary: 수신자 검색
+      responses:
+        "200":
+          description: 수신자 검색
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipientPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      parameters:
+        - in: query
+          name: includeSent
+          description: false면 SENT 이력이 없는 수신자만
+          schema:
+            type: boolean
+            default: true
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: groupId
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      description: 이름/국내 번호 부분검색. 이름과 ID 오름차순으로 정렬하며 현재 필터 전체 total과 nextCursor를 반환한다.
+    post:
+      tags:
+        - recipients
+      operationId: createRecipient
+      summary: 수신자 등록
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - phone
+              properties:
+                customFields:
+                  type: array
+                  maxItems: 20
+                  description: 헤더 원본 순서 유지, 전체 UTF-8 JSON 2000bytes 이하
+                  items:
+                    type: object
+                    required: [name, value]
+                    properties:
+                      name:
+                        type: string
+                        minLength: 1
+                        maxLength: 100
+                      value:
+                        type: string
+                        maxLength: 1000
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                phone:
+                  type: string
+                groupId:
+                  type: string
+                  maxLength: 100
+      responses:
+        "201":
+          description: 수신자 등록
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Recipient"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /recipients/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      tags:
+        - recipients
+      operationId: updateRecipient
+      summary: 수신자 수정
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - phone
+              properties:
+                customFields:
+                  type: array
+                  maxItems: 20
+                  description: 헤더 원본 순서 유지, 전체 UTF-8 JSON 2000bytes 이하
+                  items:
+                    type: object
+                    required: [name, value]
+                    properties:
+                      name:
+                        type: string
+                        minLength: 1
+                        maxLength: 100
+                      value:
+                        type: string
+                        maxLength: 1000
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                phone:
+                  type: string
+                groupId:
+                  type: string
+                  maxLength: 100
+      responses:
+        "200":
+          description: 수신자 수정
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Recipient"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - recipients
+      operationId: deleteRecipient
+      summary: 수신자 삭제 (과거 snapshot 유지)
+      responses:
+        "204":
+          description: 수신자 삭제 (과거 snapshot 유지)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /sms/campaigns:
+    post:
+      tags:
+        - sms
+      operationId: createSmsCampaign
+      summary: SMS 캠페인 snapshot 생성
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSmsCampaign"
+      responses:
+        "200":
+          description: 동일 requestId 재요청
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsCampaign"
+        "201":
+          description: SMS 캠페인 snapshot 생성
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      description: requestId를 최초 생성 후 보존한다. 동일 입력 재요청은200 같은 캠페인, 다른 입력은409. 수신자1~50명.
+    get:
+      tags:
+        - sms
+      operationId: listSmsCampaigns
+      summary: 캠페인 이력
+      responses:
+        "200":
+          description: 캠페인 이력
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsCampaignPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+  /sms/campaigns/{campaignId}:
+    parameters:
+      - name: campaignId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - sms
+      operationId: getSmsCampaign
+      summary: 캠페인 진행상태
+      responses:
+        "200":
+          description: 캠페인 진행상태
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /sms/campaigns/{campaignId}/recipients:
+    parameters:
+      - name: campaignId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - sms
+      operationId: listSmsCampaignRecipients
+      summary: 발송 대상 snapshot 및 상태
+      responses:
+        "200":
+          description: 발송 대상 snapshot 및 상태
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - items
+                properties:
+                  items:
+                    type: array
+                    maxItems: 50
+                    items:
+                      $ref: "#/components/schemas/SmsCampaignRecipient"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /sms/campaigns/{campaignId}/start:
+    parameters:
+      - name: campaignId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - sms
+      operationId: startSmsCampaign
+      summary: 명시적 발송 시작/계속 보내기
+      responses:
+        "200":
+          description: 명시적 발송 시작/계속 보내기
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      description: READY 또는 CANCELLED 캠페인을 SENDING으로 변경. 기존 SENDING이면 멱등 응답. READY 대상이
+        없으면409. 앱 기동시 자동 호출하지 않는다.
+  /sms/campaigns/{campaignId}/cancel:
+    parameters:
+      - name: campaignId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - sms
+      operationId: cancelSmsCampaign
+      summary: 후속 발송 중지
+      responses:
+        "200":
+          description: 후속 발송 중지
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      description: 이후 claim 차단. 이미 SENDING인 한 건의 결과는 계속 저장한다. SENT는 바꾸지 않는다.
+  /sms/campaigns/{campaignId}/recipients/{id}:
+    parameters:
+      - name: campaignId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      tags:
+        - sms
+      operationId: updateSmsCampaignRecipient
+      summary: 한 건 발송 확보 또는 결과 기록
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SmsRecipientUpdate"
+      responses:
+        "200":
+          description: 한 건 발송 확보 또는 결과 기록
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsDispatchResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      description: SENDING 요청 최초 성공만 dispatchAllowed=true. 같은 attempt 재요청은false이며
+        Native 재호출 금지. 캠페인별 동시 SENDING 최대1. SENT/FAILED 결과는 같은 attempt 최종 상태 반복만
+        멱등. FAILED+OUTCOME_UNKNOWN인 현재 동일 attempt의 늦은 실제 SENT 정정만 예외 허용하며 재발송 권한은
+        주지 않는다. 서버 저장 성공 후 다음 대상 발송.
+  /sms/campaigns/{campaignId}/recipients/{id}/retry:
+    parameters:
+      - name: campaignId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - sms
+      operationId: retrySmsCampaignRecipient
+      summary: 명시적으로 선택한 실패 건 재시도 준비
+      responses:
+        "200":
+          description: 명시적으로 선택한 실패 건 재시도 준비
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsDispatchResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: ACCOUNT_DISABLED 또는 PASSWORD_CHANGE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "NOT_FOUND: 내 데이터가 아니거나 없음"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: STATE_CONFLICT, PHONE_ALREADY_EXISTS 또는 IDEMPOTENCY_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      description: FAILED만 READY로 변경한다. OUTCOME_UNKNOWN/PARTIAL_SENT는409로 재시도 금지.
+        SENT/SENDING 거부. 최대20회, 이전 attemptId 재사용 금지. 이후 start와 새 attempt claim 필요.
   /health:
     get:
       summary: 헬스체크
@@ -245,6 +1176,10 @@ paths:
         '500': { $ref: '#/components/responses/InternalError' }
 
 tags:
+  - name: recipients
+    description: 사용자별 수신자 관리
+  - name: sms
+    description: Android SIM 발송 캠페인과 앱 보고 결과. 서버는 SMS를 발송하지 않는다.
   - name: auth
     description: 초대 전용 사용자 인증. 공개 가입과 비밀번호 찾기 API는 제공하지 않는다.
   - name: users
@@ -296,6 +1231,491 @@ components:
           example: { code: INTERNAL_ERROR, message: 서버 오류가 생겼어요 }
 
   schemas:
+    ExternalSendResult:
+      type: object
+      required: [recipient, history]
+      properties:
+        recipient: {$ref: '#/components/schemas/Recipient'}
+        history: {$ref: '#/components/schemas/RecipientHistory'}
+    MessageAttachment:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        mimeType:
+          type: string
+          enum:
+          - image/jpeg
+          - image/png
+        size:
+          type: integer
+          maximum: 307200
+        createdAt:
+          type: string
+          format: date-time
+    MessageUpload:
+      type: object
+      properties:
+        name:
+          type: string
+        mimeType:
+          type: string
+        dataBase64:
+          type: string
+          format: byte
+    MessageTemplateInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        message:
+          type: string
+          maxLength: 2000
+        attachmentIds:
+          type: array
+          maxItems: 3
+          items:
+            type: string
+    MessageTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        message:
+          type: string
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    RecipientImportRow:
+      type: object
+      properties:
+        customFields:
+          type: array
+          maxItems: 20
+          description: 헤더 원본 순서 유지, 전체 UTF-8 JSON 2000bytes 이하
+          items:
+            type: object
+            required: [name, value]
+            properties:
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              value:
+                type: string
+                maxLength: 1000
+        row:
+          type: integer
+        name:
+          type: string
+        phone:
+          type: string
+        groupId:
+          type: string
+        status:
+          type: string
+          enum:
+          - ADD
+          - EXCLUDED
+        reason:
+          type: string
+    RecipientImport:
+      type: object
+      properties:
+        id:
+          type: string
+        addedCount:
+          type: integer
+        excludedCount:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecipientImportRow'
+        createdAt:
+          type: string
+          format: date-time
+        confirmed:
+          type: boolean
+    RecipientHistory:
+      type: object
+      required:
+      - id
+      - recipientId
+      - name
+      - phone
+      - message
+      - status
+      - source
+      - attachments
+      - createdAt
+      - updatedAt
+      properties:
+        id:
+          type: string
+        recipientId:
+          type: string
+        campaignId:
+          type: string
+        campaignTitle:
+          type: string
+        name:
+          type: string
+        phone:
+          type: string
+        message:
+          type: string
+        errorCode:
+          type: string
+        errorMessage:
+          type: string
+        source:
+          type: string
+          enum:
+          - ANDROID
+          - EXTERNAL
+        status:
+          type: string
+          enum:
+          - SENDING
+          - SENT
+          - FAILED
+        transport:
+          type: string
+          enum:
+          - SMS
+          - LMS
+          - MMS
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        sentAt:
+          type: string
+          format: date-time
+          nullable: true
+        failedAt:
+          type: string
+          format: date-time
+          nullable: true
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
+    Recipient:
+      type: object
+      required:
+        - id
+        - name
+        - phone
+        - groupId
+        - createdAt
+        - updatedAt
+      properties:
+        sentCount:
+          type: integer
+          minimum: 0
+          description: 성공 SENT 시도 수 (멱등 결과 중복 제외)
+        customFields:
+          type: array
+          maxItems: 20
+          description: 헤더 원본 순서 유지, 전체 UTF-8 JSON 2000bytes 이하
+          items:
+            type: object
+            required: [name, value]
+            properties:
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              value:
+                type: string
+                maxLength: 1000
+        latestSentAt:
+          type: string
+          format: date-time
+          nullable: true
+        id:
+          type: string
+        name:
+          type: string
+          maxLength: 100
+        phone:
+          type: string
+          example: "01012345678"
+        groupId:
+          type: string
+          maxLength: 100
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    RecipientPage:
+      type: object
+      required:
+        - items
+        - nextCursor
+      properties:
+        total:
+          type: integer
+          description: 현재 필터 조건 전체 수신자 수
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recipient"
+        nextCursor:
+          type: string
+          nullable: true
+    CreateSmsCampaign:
+      type: object
+      required:
+        - requestId
+        - title
+        - message
+        - recipientIds
+      properties:
+        attachmentIds:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+        requestId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9_-]+$
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+        message:
+          type: string
+          minLength: 0
+          maxLength: 2000
+          description: 첨부가 없으면 공백뿐인 본문 거부. 앞뒤 공백과 개행은 보존.
+        recipientIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+    SmsCampaign:
+      type: object
+      required:
+        - id
+        - title
+        - message
+        - status
+        - recipientCount
+        - readyCount
+        - sendingCount
+        - sentCount
+        - failedCount
+        - createdAt
+        - updatedAt
+        - startedAt
+        - completedAt
+      properties:
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
+        id:
+          type: string
+        title:
+          type: string
+          maxLength: 100
+        message:
+          type: string
+          maxLength: 2000
+        status:
+          type: string
+          enum:
+            - READY
+            - SENDING
+            - COMPLETED
+            - PARTIAL_FAILED
+            - CANCELLED
+        recipientCount:
+          type: integer
+          minimum: 0
+        readyCount:
+          type: integer
+          minimum: 0
+        sendingCount:
+          type: integer
+          minimum: 0
+        sentCount:
+          type: integer
+          minimum: 0
+        failedCount:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+    SmsCampaignPage:
+      type: object
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SmsCampaign"
+        nextCursor:
+          type: string
+          nullable: true
+    SmsCampaignRecipient:
+      type: object
+      required:
+        - id
+        - campaignId
+        - recipientId
+        - name
+        - phone
+        - message
+        - status
+        - attemptId
+        - attemptCount
+        - sentAt
+        - failedAt
+        - errorCode
+        - errorMessage
+        - createdAt
+        - updatedAt
+      properties:
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
+        transport:
+          type: string
+          enum:
+          - SMS
+          - LMS
+          - MMS
+        id:
+          type: string
+        campaignId:
+          type: string
+        recipientId:
+          type: string
+        name:
+          type: string
+          maxLength: 100
+        phone:
+          type: string
+        message:
+          type: string
+          maxLength: 2000
+        status:
+          type: string
+          enum:
+            - READY
+            - SENDING
+            - SENT
+            - FAILED
+        attemptId:
+          type: string
+        attemptCount:
+          type: integer
+          minimum: 0
+        sentAt:
+          type: string
+          format: date-time
+          nullable: true
+        failedAt:
+          type: string
+          format: date-time
+          nullable: true
+        errorCode:
+          type: string
+          maxLength: 100
+        errorMessage:
+          type: string
+          maxLength: 300
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SmsRecipientUpdate:
+      type: object
+      required:
+        - status
+        - attemptId
+      properties:
+        transport:
+          type: string
+          enum:
+          - SMS
+          - LMS
+          - MMS
+        status:
+          type: string
+          enum:
+            - SENDING
+            - SENT
+            - FAILED
+        attemptId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9_-]+$
+        errorCode:
+          type: string
+          maxLength: 100
+          description: FAILED 필수. OUTCOME_UNKNOWN/PARTIAL_SENT는 확인필요 및 재시도 금지.
+        errorMessage:
+          type: string
+          maxLength: 300
+    SmsDispatchResult:
+      type: object
+      required:
+        - campaign
+        - recipient
+        - dispatchAllowed
+      properties:
+        campaign:
+          $ref: "#/components/schemas/SmsCampaign"
+        recipient:
+          $ref: "#/components/schemas/SmsCampaignRecipient"
+        dispatchAllowed:
+          type: boolean
+          description: 최초 READY→SENDING 트랜잭션 승자만 true. false면 SMS를 호출하지 않는다.
     TokenSet:
       type: object
       required: [accessToken, refreshToken, expiresInSec]

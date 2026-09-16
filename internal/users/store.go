@@ -10,8 +10,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/sslim7/jayeon-was/internal/auth"
-	"github.com/sslim7/jayeon-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/credentials"
 )
 
 // Collection 은 사용자 계정 문서가 사는 곳이다. cmd/create-user 도 이 Store 를 거쳐

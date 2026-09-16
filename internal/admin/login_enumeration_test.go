@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/sslim7/jayeon-was/internal/credentials"
+	"github.com/sslim7/nature-was/internal/credentials"
 )
 
 // 이 파일은 실제 Firestore 에뮬레이터를 상대로 도는 통합 테스트다.
@@ -80,7 +80,7 @@ func TestLoginDoesNotRevealWhetherAccountExists(t *testing.T) {
 	ctx := context.Background()
 
 	// 존재하는 계정 하나를 만든다. 이메일은 테스트마다 달라야 다른 실행과 부딪히지 않는다.
-	email := credentials.NormalizeEmail("enum-probe-" + time.Now().Format("20060102150405.000000") + "@jayeon.kr")
+	email := credentials.NormalizeEmail("enum-probe-" + time.Now().Format("20060102150405.000000") + "@nature.kr")
 	hash, err := credentials.HashPassword("correct-password-1234")
 	if err != nil {
 		t.Fatalf("비밀번호 해싱 실패: %v", err)
@@ -96,7 +96,7 @@ func TestLoginDoesNotRevealWhetherAccountExists(t *testing.T) {
 	}
 
 	existingStatus, existingBody := postLogin(t, h, email, "wrong-password")
-	missingStatus, missingBody := postLogin(t, h, "no-such-admin@jayeon.kr", "wrong-password")
+	missingStatus, missingBody := postLogin(t, h, "no-such-admin@nature.kr", "wrong-password")
 
 	if existingStatus != http.StatusUnauthorized {
 		t.Errorf("있는 계정 + 틀린 비밀번호는 401 이어야 한다: got %d", existingStatus)
@@ -121,7 +121,7 @@ func TestLoginInactiveAccountNeedsCorrectPassword(t *testing.T) {
 	ctx := context.Background()
 
 	const password = "correct-password-1234"
-	email := credentials.NormalizeEmail("inactive-probe-" + time.Now().Format("20060102150405.000000") + "@jayeon.kr")
+	email := credentials.NormalizeEmail("inactive-probe-" + time.Now().Format("20060102150405.000000") + "@nature.kr")
 	hash, err := credentials.HashPassword(password)
 	if err != nil {
 		t.Fatalf("비밀번호 해싱 실패: %v", err)
@@ -139,7 +139,7 @@ func TestLoginInactiveAccountNeedsCorrectPassword(t *testing.T) {
 	// 비밀번호를 모르면 비활성이라는 사실조차 알 수 없어야 한다 — 401 이고,
 	// 없는 계정에 대한 응답과 같아야 한다.
 	wrongStatus, wrongBody := postLogin(t, h, email, "wrong-password")
-	_, missingBody := postLogin(t, h, "no-such-admin@jayeon.kr", "wrong-password")
+	_, missingBody := postLogin(t, h, "no-such-admin@nature.kr", "wrong-password")
 	if wrongStatus != http.StatusUnauthorized {
 		t.Errorf("비활성 계정 + 틀린 비밀번호는 401 이어야 한다(403 이면 계정 존재가 샌다): got %d", wrongStatus)
 	}
