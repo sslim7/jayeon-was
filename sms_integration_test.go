@@ -217,3 +217,102 @@ func TestSMSHTTPFiftyRecipientLifecycle(t *testing.T) {
 		}
 	}
 }
+
+// 앱 예약함이 쓰는 reserved 값이 생성 응답·단건 조회·목록 JSON에 그대로 실리는지 확인한다.
+func TestSMSHTTPReservedCampaign(t *testing.T) {
+	host := os.Getenv("FIRESTORE_EMULATOR_HOST")
+	if host == "" {
+		t.Skip("Firestore emulator required")
+	}
+	project := fmt.Sprintf("demo-sms-reserved-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	fs, err := firestore.NewClient(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		fs.Close()
+		req, e := http.NewRequest(http.MethodDelete, "http://"+host+"/emulator/v1/projects/"+project+"/databases/(default)/documents", nil)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		resp, e := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+	})
+	accounts := users.NewStore(fs)
+	tokens := auth.NewTokenIssuer("sms-reserved-integration-test-secret")
+	id, err := accounts.Create(ctx, users.User{Email: "reserved@example.test", UserName: "예약 테스트", IsActive: true, PasswordHash: "unused-test-hash", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := tokens.IssueAccess(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	guard := userguard.New(accounts)
+	recipients.Register(mux, fs, guard)
+	sms.Register(mux, fs, guard)
+	handler := tokens.Middleware(mux)
+	call := func(method, path string, body any, want int, out any) {
+		t.Helper()
+		var payload []byte
+		if body != nil {
+			payload, err = json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		r := httptest.NewRequest(method, path, bytes.NewReader(payload)).WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s %s: status %d want %d body %s", method, path, w.Code, want, w.Body.String())
+		}
+		if out != nil {
+			if e := json.Unmarshal(w.Body.Bytes(), out); e != nil {
+				t.Fatalf("decode %s: %v", path, e)
+			}
+		}
+	}
+	var person recipients.Recipient
+	call("POST", "/recipients", map[string]any{"name": "예약 수신자", "phone": "010-3000-0001"}, 201, &person)
+	var reserved, plain sms.Campaign
+	call("POST", "/sms/campaigns", map[string]any{"requestId": "reserved-http-01", "title": "예약 문자", "message": "예약", "recipientIds": []string{person.ID}, "reserved": true}, 201, &reserved)
+	call("POST", "/sms/campaigns", map[string]any{"requestId": "reserved-http-02", "title": "일반 문자", "message": "일반", "recipientIds": []string{person.ID}}, 201, &plain)
+	if !reserved.Reserved || plain.Reserved {
+		t.Fatalf("create: reserved=%v plain=%v", reserved.Reserved, plain.Reserved)
+	}
+	var single map[string]any
+	call("GET", "/sms/campaigns/"+reserved.ID, nil, 200, &single)
+	if single["reserved"] != true {
+		t.Fatalf("reserved missing in campaign JSON: %v", single)
+	}
+	var page struct {
+		Items []sms.Campaign `json:"items"`
+	}
+	call("GET", "/sms/campaigns?limit=50", nil, 200, &page)
+	if len(page.Items) != 2 {
+		t.Fatal("list size", len(page.Items))
+	}
+	for _, item := range page.Items {
+		if item.Reserved != (item.ID == reserved.ID) {
+			t.Fatalf("list reserved: %+v", item)
+		}
+	}
+	// 예약 값은 이후 상태 변경에도 유지된다.
+	call("POST", "/sms/campaigns/"+reserved.ID+"/start", nil, 200, &reserved)
+	call("POST", "/sms/campaigns/"+reserved.ID+"/cancel", nil, 200, &reserved)
+	if !reserved.Reserved {
+		t.Fatal("reserved lost after state change")
+	}
+}

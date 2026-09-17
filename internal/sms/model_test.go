@@ -1,6 +1,7 @@
 package sms
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -170,5 +171,29 @@ func TestRevisionTracksChangesAtIdenticalClockTime(t *testing.T) {
 	before = d.Revision
 	if _, err = d.apply("recipient1", "patch", PatchRequest{Status: Sent, AttemptID: "attempt_1"}, now); err != nil || d.Revision != before+1 {
 		t.Fatal("result change not tracked", err)
+	}
+}
+
+// 예약 여부는 자유 값이며 생략하면 false다. 값이 false면 직렬화 결과가 예전과 같아
+// 기존 requestId의 멱등 fingerprint가 달라지지 않는다.
+func TestReservedFlagStaysCompatible(t *testing.T) {
+	r := CreateRequest{RequestID: "request_1", Title: "모임", Message: "한글", RecipientIDs: []string{"id"}, Reserved: true}
+	if r.validate() != nil {
+		t.Fatal("reserved rejected")
+	}
+	b, err := json.Marshal(r)
+	if err != nil || !strings.Contains(string(b), `"reserved":true`) {
+		t.Fatal("reserved not serialized", string(b), err)
+	}
+	r.Reserved = false
+	if r.validate() != nil {
+		t.Fatal("default rejected")
+	}
+	if b, err = json.Marshal(r); err != nil || strings.Contains(string(b), "reserved") {
+		t.Fatal("fingerprint changed for existing requests", string(b), err)
+	}
+	var decoded CreateRequest
+	if err = json.Unmarshal([]byte(`{"requestId":"request_1","title":"모임","message":"한글","recipientIds":["id"]}`), &decoded); err != nil || decoded.Reserved {
+		t.Fatal("missing field must decode to false", decoded, err)
 	}
 }

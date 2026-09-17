@@ -615,7 +615,7 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
-      description: requestId를 최초 생성 후 보존한다. 동일 입력 재요청은200 같은 캠페인, 다른 입력은409. 수신자1~50명.
+      description: requestId를 최초 생성 후 보존한다. 동일 입력 재요청은200 같은 캠페인, 다른 입력은409. 수신자1~50명. reserved는 예약으로 만든 문자만 true로 보낸다.
     get:
       tags:
         - sms
@@ -1518,6 +1518,10 @@ components:
           uniqueItems: true
           items:
             type: string
+        reserved:
+          type: boolean
+          default: false
+          description: 사용자가 「예약」으로 만든 문자면 true. 생략하면 false이며 이후 변경 API는 없다.
     SmsCampaign:
       type: object
       required:
@@ -1530,6 +1534,7 @@ components:
         - sendingCount
         - sentCount
         - failedCount
+        - reserved
         - createdAt
         - updatedAt
         - startedAt
@@ -1570,6 +1575,9 @@ components:
         failedCount:
           type: integer
           minimum: 0
+        reserved:
+          type: boolean
+          description: 예약으로 만든 문자 표시. 필드가 없는 과거 문서는 false로 읽힌다.
         createdAt:
           type: string
           format: date-time

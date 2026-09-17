@@ -29,15 +29,18 @@ WAS 담당은 앱 파일을 수정하지 않는다. 직접 세션 메시지 도�
 
 ## 캠페인
 
-`Campaign = {id,title,message,status,recipientCount,readyCount,sendingCount,sentCount,failedCount,createdAt,updatedAt,startedAt,completedAt}`
+`Campaign = {id,title,message,status,recipientCount,readyCount,sendingCount,sentCount,failedCount,reserved,createdAt,updatedAt,startedAt,completedAt}`
 
 campaignRecipient `id`는 캠페인 간에도 충돌하지 않는 식별자다. Native ledger는 이 id와 attemptId를 함께 쓴다.
 
 `CampaignRecipient = {id,campaignId,recipientId,name,phone,message,status,attemptId,attemptCount,sentAt,failedAt,errorCode,errorMessage,createdAt,updatedAt}`
 
-- POST `/sms/campaigns`: `{requestId,title,message,recipientIds:[...]}` →201 Campaign. 동일 requestId/동일 입력 재요청 →200 같은 캠페인. 다른 입력 →409 IDEMPOTENCY_CONFLICT.
+- POST `/sms/campaigns`: `{requestId,title,message,recipientIds:[...],reserved?}` →201 Campaign. 동일 requestId/동일 입력 재요청 →200 같은 캠페인. 다른 입력 →409 IDEMPOTENCY_CONFLICT.
 - requestId는 앱이 사용자 한 번의 작성/전송 동작마다 생성·보존하는 UUID형 식별자(8~128 ASCII 영숫자/_/-). 타임아웃에 새 requestId를 만들지 않는다.
 - title1~100자, message 공백뿐인 값 거부/최대2000 Unicode 문자, recipientIds 1~50개(중복 ID/중복 정규화 번호 거부). 실제 메시지 앞뒤 공백/개행은 보존한다.
+- `reserved`는 선택 boolean이며 기본 false다. 사용자가 「예약」으로 만든 문자만 true로 보내고 앱이 예약함을 이 값으로 거른다. 단순히 아직 보내지 않은 READY와 구분하기 위한 표시다.
+- `reserved`는 생성 시점에만 정해진다. 변경 API는 없고 start/cancel/patch/retry는 값을 바꾸지 않는다. 목록/조회에 필터 파라미터도 없다(앱이 받아서 거른다).
+- 필드가 없는 과거 캠페인 문서는 `reserved:false`로 읽힌다. 값을 생략한 생성 요청은 예전과 동일한 JSON이라 같은 requestId의 멱등 판정도 그대로다.
 - 캠페인 생성 트랜잭션에서 현재 사용자 수신자의 name/phone/message를 고정한다. 이후 원본 수정·삭제 영향 없음.
 - GET `/sms/campaigns?limit=50&cursor=...` → 목록. 최신 생성순.
 - GET `/sms/campaigns/{id}` →Campaign.
