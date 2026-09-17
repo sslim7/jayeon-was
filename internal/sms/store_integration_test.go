@@ -183,3 +183,64 @@ func TestFirestoreMaximumCampaignDocument(t *testing.T) {
 		t.Fatal("missing page", seen)
 	}
 }
+
+// 예약 표시는 생성 시점에만 정해지고 응답·재조회·목록에 그대로 실린다.
+// 필드가 없는 과거 문서는 false로 읽혀 예약함에 섞이지 않아야 한다.
+func TestFirestoreReservedFlag(t *testing.T) {
+	if os.Getenv("FIRESTORE_EMULATOR_HOST") == "" {
+		t.Skip("requires Firestore emulator")
+	}
+	ctx := context.Background()
+	client, err := firestore.NewClient(ctx, "demo-jayeon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	uid := fmt.Sprintf("sms-reserved-%d", time.Now().UnixNano())
+	s := &FirestoreStore{Client: client}
+	if _, err = recipients.DocumentRef(client, uid, "only").Set(ctx, recipients.Recipient{ID: "only", Name: "수신자", Phone: "01012345678"}); err != nil {
+		t.Fatal(err)
+	}
+	defer recipients.DocumentRef(client, uid, "only").Delete(ctx)
+	reserved, created, err := s.Create(ctx, uid, CreateRequest{RequestID: "reserved_001", Title: "예약", Message: "예약 문자", RecipientIDs: []string{"only"}, Reserved: true})
+	if err != nil || !created || !reserved.Reserved {
+		t.Fatal("reserved create", reserved, created, err)
+	}
+	defer s.collection(uid).Doc(reserved.ID).Delete(ctx)
+	plain, created, err := s.Create(ctx, uid, CreateRequest{RequestID: "reserved_002", Title: "일반", Message: "보통 문자", RecipientIDs: []string{"only"}})
+	if err != nil || !created || plain.Reserved {
+		t.Fatal("default create", plain, created, err)
+	}
+	defer s.collection(uid).Doc(plain.ID).Delete(ctx)
+	// 값이 없는 과거 캠페인 문서를 그대로 재현한다.
+	now := time.Now().UTC()
+	legacy := s.collection(uid).Doc("legacy_campaign")
+	defer legacy.Delete(ctx)
+	if _, err = legacy.Set(ctx, map[string]any{
+		"revision":    int64(1),
+		"fingerprint": strings.Repeat("b", 64),
+		"recipients":  []any{},
+		"campaign": map[string]any{
+			"id": "legacy_campaign", "title": "과거", "message": "이전 데이터", "status": Ready,
+			"recipientCount": 1, "readyCount": 1, "createdAt": now, "updatedAt": now,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{reserved.ID: true, plain.ID: false, "legacy_campaign": false}
+	for id, expected := range want {
+		d, e := s.Get(ctx, uid, id)
+		if e != nil || d.Campaign.Reserved != expected {
+			t.Fatal("reread", id, d.Campaign.Reserved, e)
+		}
+	}
+	items, next, err := s.List(ctx, uid, 50, "")
+	if err != nil || next != nil || len(items) != len(want) {
+		t.Fatal("list", items, next, err)
+	}
+	for _, item := range items {
+		if item.Reserved != want[item.ID] {
+			t.Fatal("list reserved", item.ID, item.Reserved)
+		}
+	}
+}

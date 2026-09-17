@@ -40,6 +40,7 @@ type Campaign struct {
 	SendingCount   int                    `json:"sendingCount" firestore:"sendingCount"`
 	SentCount      int                    `json:"sentCount" firestore:"sentCount"`
 	FailedCount    int                    `json:"failedCount" firestore:"failedCount"`
+	Reserved       bool                   `json:"reserved" firestore:"reserved"` // 예약으로 만든 문자 표시. 필드가 없는 과거 문서는 false로 읽힌다.
 	CreatedAt      time.Time              `json:"createdAt" firestore:"createdAt"`
 	UpdatedAt      time.Time              `json:"updatedAt" firestore:"updatedAt"`
 	StartedAt      *time.Time             `json:"startedAt" firestore:"startedAt"`
@@ -83,6 +84,7 @@ type CreateRequest struct {
 	Title         string   `json:"title"`
 	Message       string   `json:"message"`
 	RecipientIDs  []string `json:"recipientIds"`
+	Reserved      bool     `json:"reserved,omitempty"` // 생략하면 false. omitempty라 기존 요청의 fingerprint를 바꾸지 않는다.
 }
 type PatchRequest struct {
 	Transport    string `json:"transport,omitempty"`

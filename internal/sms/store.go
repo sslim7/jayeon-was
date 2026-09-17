@@ -74,7 +74,7 @@ func (s *FirestoreStore) Create(ctx context.Context, uid string, req CreateReque
 			return e
 		}
 		now := time.Now().UTC()
-		d := document{Fingerprint: fingerprint, Campaign: Campaign{Attachments: attachments, ID: ref.ID, Title: req.Title, Message: req.Message, Status: Ready, RecipientCount: len(req.RecipientIDs), ReadyCount: len(req.RecipientIDs), CreatedAt: now, UpdatedAt: now}, Recipients: make([]CampaignRecipient, 0, len(req.RecipientIDs))}
+		d := document{Fingerprint: fingerprint, Campaign: Campaign{Attachments: attachments, ID: ref.ID, Title: req.Title, Message: req.Message, Status: Ready, Reserved: req.Reserved, RecipientCount: len(req.RecipientIDs), ReadyCount: len(req.RecipientIDs), CreatedAt: now, UpdatedAt: now}, Recipients: make([]CampaignRecipient, 0, len(req.RecipientIDs))}
 		phones := map[string]bool{}
 		for _, id := range req.RecipientIDs {
 			snap, err := tx.Get(recipients.DocumentRef(s.Client, uid, id))
