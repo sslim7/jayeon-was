@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/sslim7/nature-was/internal/admin"
 	"github.com/sslim7/nature-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/calls"
 	"github.com/sslim7/nature-was/internal/messaging"
 	"github.com/sslim7/nature-was/internal/recipients"
 	"github.com/sslim7/nature-was/internal/sms"
@@ -127,6 +128,7 @@ func main() {
 	// 개인정보 도메인은 현재 계정 상태와 임시 비밀번호 변경 여부도 확인한다.
 	domainGuard := userguard.New(users.NewStore(client))
 	recipients.Register(mux, client, domainGuard)
+	calls.Register(mux, client, domainGuard)
 	sms.Register(mux, client, domainGuard)
 	messaging.Register(mux, client, domainGuard)
 
