@@ -254,15 +254,100 @@ func (h *audioHandler) complete(w http.ResponseWriter, r *http.Request, uid, id 
 	httpx.WriteJSON(w, 200, j.summaryRecord())
 }
 
+// jobFromRecord 는 **작업 문서가 없는 옛 통화**를 위해 통화 레코드에서 작업을 만들어 낸다.
+//
+// 기기에서 받아쓰기(whisper.rn)와 요약(온디바이스 LLM)까지 끝내고 PUT /calls/{id} 로 결과만
+// 올린 통화에는 callJobs 문서가 **아예 없다.** 그런 통화를 서버 LLM 으로 다시 분석하려면
+// 파이프라인이 읽을 작업 문서가 있어야 하는데, 없는 값을 그럴듯하게 채우면 화면이 조용히
+// 거짓말을 한다. 그래서 **레코드가 이미 아는 값만** 옮기고 나머지는 비운 채로 둔다.
+//
+// 🔴 Audio 를 비워 두는 것이 이 함수의 핵심이다. 이 통화의 녹음 파일은 GCS 에 없다 —
+// 기기가 자기 파일로 받아쓰고 결과만 보냈기 때문이다. 여기에 그럴듯한 object 경로를 채우면
+// 파이프라인이 **없는 파일로 ASR 을 부른다**: 실패로 끝나기 전에 오디오 업로드와 전사 제출이
+// 이미 나가므로 요금은 요금대로 나가고, 재시도 상한까지 세 번 되풀이한다.
+// pipeline.stepStart 와 requeueASR 의 AUDIO_MISSING 가드가 그 뒤를 받친다.
+//
+// 🔴 Usage 도 비운다. 서버 ASR 을 한 번도 부른 적이 없으므로 AudioSeconds 는 **0 이 맞다** —
+// 서버가 받아쓰기에 쓴 돈이 실제로 0원이다. 통화 길이를 여기에 옮겨 적으면 쓰지도 않은
+// 받아쓰기 요금이 상세 화면의 원가에 그대로 뜬다(§cost.go). 토큰은 이번 LLM 호출이 채운다.
+//
+// ⚠️ 모델 이름(ASRModel/LLMModel/PromptVersion)도 비운다. 레코드의 ai.model 에는 기기가 쓴
+// `Qwen3-0.6B-Q8_0` 이 들어 있는데 그것을 작업 문서로 옮기면, 서버가 한 일이 아닌 모델 이름이
+// **서버 파이프라인의 값인 양** 상세 화면에 붙는다. 비워 두면 summaryRecord 가 ai 를 아예
+// 만들지 않아(§job.go) 레코드의 기존 값이 그대로 남고, 서버 LLM 이 답하는 순간 새 값으로 바뀐다.
+func jobFromRecord(uid, id string, rec *Record, now time.Time) (*job, error) {
+	// 🔴 통화일시는 반드시 레코드 값을 잇는다. 이 값은 분석이 끝날 때 summaryRecord 를 거쳐
+	// **통화 레코드에 그대로 덮어써진다** — 비워 두면 0001-01-01 이 저장되고, 목록이
+	// recordedAt 순이라 그 통화는 화면에서 사라진 것처럼 맨 끝으로 밀린다.
+	recorded, err := time.Parse(time.RFC3339Nano, rec.Call.RecordedAt)
+	if err != nil {
+		return nil, err
+	}
+	j := &job{
+		UID: uid, CallID: id,
+		State: stateTranscribed, Stage: stageOf(stateTranscribed), Progress: progressOf(stateTranscribed),
+		ContactName: rec.Contact.Name, ContactPhone: rec.Contact.Phone, ContactRecipientID: derefString(rec.Contact.RecipientID),
+		FileName: rec.Call.FileName, RecordedAt: recorded.UTC(),
+		CreatedAt: now, UpdatedAt: now, NextAttemptAt: now,
+	}
+	// createdAt 도 레코드 값을 잇는다. 읽을 수 없으면 지금 시각으로 둔다 — 이 값은
+	// 응답에만 쓰이고 저장 순서를 정하지 않아, 통화일시와 달리 되돌릴 수 있는 오차다.
+	if t, cerr := time.Parse(time.RFC3339Nano, rec.CreatedAt); cerr == nil {
+		j.CreatedAt = t.UTC()
+	}
+	if d := rec.Call.Duration; d != nil && *d > 0 {
+		j.Duration = *d
+	}
+	return j, nil
+}
+
+// hasTranscript 는 다시 분석할 원문이 레코드에 남아 있는지다.
+func hasTranscript(rec *Record) bool {
+	return rec.Transcript != nil && strings.TrimSpace(rec.Transcript.Text) != ""
+}
+
 // reanalyze 는 **오디오를 다시 전사하지 않고** 분석만 다시 돌린다.
 //
 // 🔴 ASR 이 이 파이프라인에서 가장 비싼 단계이고, 재분석이 필요한 이유는 대개 프롬프트가
 // 바뀌었거나 LLM 이 실패했을 때다. 전사문은 그대로 쓸 수 있다.
 // 오디오 원본은 366일 뒤 사라지지만 **이 경로는 전사문만 쓰므로 그 뒤에도 동작한다.**
+//
+// 조건은 하나뿐이다 — **다시 분석할 원문이 있을 것.** 작업 문서가 없는 기기 경로 통화도
+// 레코드에 원문이 있으면 여기서 작업을 만들어 이어간다(jobFromRecord).
 func (h *audioHandler) reanalyze(w http.ResponseWriter, r *http.Request, uid, id string) {
-	j, err := h.load(r.Context(), uid, id)
-	if err != nil {
-		writeJobError(w, err, "통화를 찾을 수 없어요")
+	// 🔴 여기서 load 를 쓰면 안 된다. load 는 「남의 것」과 「없는 것」을 똑같이 NotFound 로
+	// 돌려주는데, 그 둘을 뭉뚱그린 채 「없으면 만든다」로 가면 **남의 통화 ID 로 재분석을 눌러
+	// 그 작업 문서를 통째로 덮어쓸 수 있다**(uploadURL 과 같은 함정이다). 존재 여부와 소유권을
+	// 여기서만 따로 보고, 응답은 여전히 404 라 바깥에서는 구분되지 않는다.
+	j, err := h.jobs.Get(r.Context(), id)
+	// rec 은 **읽었을 때만** 채운다. 원문은 25분 통화면 수십만 바이트라, 아래에서 한 번 더
+	// 읽으면 같은 조각들을 통째로 두 번 내려받게 된다.
+	var rec *Record
+	switch {
+	case status.Code(err) == codes.NotFound:
+		got, gerr := h.records.Get(r.Context(), uid, id)
+		if gerr != nil {
+			// 작업도 레코드도 없다 = 이 사용자에게 그런 통화가 없다.
+			writeJobError(w, gerr, "통화를 찾을 수 없어요")
+			return
+		}
+		if !hasTranscript(&got) {
+			httpx.WriteError(w, 409, "CALL_NO_TRANSCRIPT", "다시 분석할 원문이 없어요")
+			return
+		}
+		rec = &got
+		j, err = jobFromRecord(uid, id, rec, h.clock())
+		if err != nil {
+			// 우리가 저장한 레코드를 우리가 읽지 못한 것이다. 통화일시를 지어내 덮어쓰느니 멈춘다.
+			log.Printf("calls: 레코드에서 작업을 만들지 못했다 call=%s: %v", id, err)
+			httpx.WriteError(w, 500, httpx.CodeInternal, "재분석을 예약하지 못했어요")
+			return
+		}
+	case err != nil:
+		httpx.WriteError(w, 500, httpx.CodeInternal, "재분석을 예약하지 못했어요")
+		return
+	case j.UID != uid:
+		httpx.WriteError(w, 404, "CALL_NOT_FOUND", "통화를 찾을 수 없어요")
 		return
 	}
 	switch j.State {
@@ -274,10 +359,13 @@ func (h *audioHandler) reanalyze(w http.ResponseWriter, r *http.Request, uid, id
 
 	if j.TranscriptShards == 0 {
 		// 작업 문서의 전사문이 없으면(옛 통화, 정리된 조각) 통화 레코드에서 되살린다.
-		rec, gerr := h.records.Get(r.Context(), uid, id)
-		if gerr != nil || rec.Transcript == nil || strings.TrimSpace(rec.Transcript.Text) == "" {
-			httpx.WriteError(w, 409, "CALL_NO_TRANSCRIPT", "다시 분석할 원문이 없어요")
-			return
+		if rec == nil {
+			got, gerr := h.records.Get(r.Context(), uid, id)
+			if gerr != nil || !hasTranscript(&got) {
+				httpx.WriteError(w, 409, "CALL_NO_TRANSCRIPT", "다시 분석할 원문이 없어요")
+				return
+			}
+			rec = &got
 		}
 		b, merr := marshalCompact(rec.Transcript)
 		if merr != nil {
@@ -310,9 +398,9 @@ func (h *audioHandler) reanalyze(w http.ResponseWriter, r *http.Request, uid, id
 		return
 	}
 	// 앱이 즉시 「내용 정리하는 중」을 보게 한다. 실패해도 다음 tick 이 다시 맞춘다.
-	if err := h.records.Touch(r.Context(), uid, id, func(rec *Record) {
+	if err := h.records.Touch(r.Context(), uid, id, func(cur *Record) {
 		s := j.summaryRecord()
-		rec.Status, rec.JobState, rec.Stage, rec.Progress, rec.Error = s.Status, s.JobState, s.Stage, s.Progress, nil
+		cur.Status, cur.JobState, cur.Stage, cur.Progress, cur.Error = s.Status, s.JobState, s.Stage, s.Progress, nil
 	}); err != nil && status.Code(err) != codes.NotFound {
 		log.Printf("calls: 재분석 상태 갱신 실패 call=%s: %v", id, err)
 	}
