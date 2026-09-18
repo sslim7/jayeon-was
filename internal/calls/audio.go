@@ -95,6 +95,9 @@ type audioHandler struct {
 	// retentionDays 는 버킷 수명주기 정책의 보관 일수다. **삭제는 GCS 가 한다** —
 	// 서버는 앱에 알려 주기 위한 정보로만 들고 있다.
 	retentionDays int
+	// pricing 은 원가 환산 단가다(§cost.go). 비어 있으면 상세 응답에 비용이 붙지 않는다 —
+	// 🔴 「모름」이지 「0원」이 아니다.
+	pricing Pricing
 }
 
 func (h *audioHandler) clock() time.Time {
@@ -321,9 +324,12 @@ func (h *audioHandler) reanalyze(w http.ResponseWriter, r *http.Request, uid, id
 // 🔴 목록에는 붙이지 않는다. 30건마다 작업 문서 30개를 읽고 서명 30개를 만드는 것은
 // 목록 조회에 불필요한 비용이다 — 그래서 목록용 요약 필드(status/stage/has_audio)는
 // 파이프라인이 통화 레코드에 복제해 둔다. 상세 한 건에서 읽기 1회가 느는 것은 감수한다.
+// 비용도 같은 자리에서 붙는다: 금액의 근거인 사용량은 **작업 문서에만** 있기 때문에,
+// 목록에 싣는 것은 곧 목록 한 페이지마다 작업 문서를 그만큼 더 읽는다는 뜻이다.
 func (h *audioHandler) enrichDetail(ctx context.Context, uid string, r *Record) {
 	j, err := h.jobs.Get(ctx, r.CallID)
 	// 작업 문서가 없는 통화는 기기 업로드 경로로 저장된 것이다 — 정상이므로 그대로 둔다.
+	// 🔴 그런 통화에는 사용량 자체가 없으므로 비용도 붙지 않는다. **0원이 아니라 「모름」이다.**
 	if err != nil || j.UID != uid {
 		return
 	}
@@ -331,6 +337,10 @@ func (h *audioHandler) enrichDetail(ctx context.Context, uid string, r *Record) 
 	// 저장된 요약은 파이프라인이 best-effort 로 갱신한다. 상세에서는 작업 문서가 정본이다.
 	r.Status, r.JobState, r.Stage = s.Status, s.JobState, s.Stage
 	r.Progress, r.Error, r.HasAudio = s.Progress, s.Error, s.HasAudio
+	// 🔴 **조건 없이 대입한다.** 단가나 사용량이 없으면 costOf 가 nil 을 돌려주고, 그 nil 이
+	// 저장 레코드에 혹시 남아 있을 값까지 함께 지운다 — 「모름」을 확실히 모름으로 내보내는
+	// 자리가 여기뿐이다.
+	r.Cost = h.pricing.costOf(j.Usage)
 	if j.Audio.Object == "" {
 		return
 	}

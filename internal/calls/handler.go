@@ -38,6 +38,11 @@ type Options struct {
 	TickCaller    string // CALL_TICK_CALLER — 허용할 Scheduler 서비스 계정 이메일
 	TickToken     string // CALL_TICK_TOKEN — 로컬·테스트 전용 공유 비밀
 	TickBatch     int    // CALL_TICK_BATCH (기본 5)
+	// Pricing 은 원가를 원화로 환산하는 단가다(§cost.go).
+	//
+	// 🔴 비어 있어도 파이프라인은 그대로 돈다 — 상세 응답에서 비용 칸만 빠진다.
+	// 단가 하나 때문에 통화분석을 끄지 않는다.
+	Pricing Pricing
 }
 
 func Register(mux *http.ServeMux, fs *firestore.Client, guard func(http.Handler) http.Handler, opts Options) {
@@ -54,7 +59,7 @@ func registerPipeline(mux *http.ServeMux, jobs jobRepo, store recordStore, guard
 		return nil
 	}
 	audio := newGCSAudio(opts.Storage, opts.Bucket)
-	h := &audioHandler{jobs: jobs, records: store, audio: audio, retentionDays: opts.RetentionDays}
+	h := &audioHandler{jobs: jobs, records: store, audio: audio, retentionDays: opts.RetentionDays, pricing: opts.Pricing}
 	h.register(mux, guard)
 
 	// 🔴 tick 호출자 설정이 없으면 라우트를 걸지 않는다. Cloud Run 이
@@ -82,7 +87,7 @@ func registerPipeline(mux *http.ServeMux, jobs jobRepo, store recordStore, guard
 	return h.enrichDetail
 }
 
-// detailEnricher 는 GET /calls/{id} 응답에만 작업 문서 정보(stage/job_state/audio_url)를 얹는다.
+// detailEnricher 는 GET /calls/{id} 응답에만 작업 문서 정보(stage/job_state/audio_url/cost)를 얹는다.
 type detailEnricher func(ctx context.Context, uid string, r *Record)
 
 // register 의 enrich 가 가변인자인 이유는 **기존 호출부와 테스트를 그대로 두기 위해서**다.
