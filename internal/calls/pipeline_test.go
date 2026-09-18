@@ -261,6 +261,10 @@ type harness struct {
 	pipe  *pipeline
 	tick  *tickHandler
 	mux   *http.ServeMux
+	// audioH 는 상세 응답을 꾸미는 핸들러다. 테스트가 단가(pricing)를 나중에 끼워 넣을 수
+	// 있도록 들고 있는다 — enrichDetail 은 포인터 리시버 메서드값이라, 등록한 뒤에 필드를
+	// 바꿔도 이미 걸린 라우트에 그대로 반영된다.
+	audioH *audioHandler
 
 	clockMu sync.Mutex
 	now     time.Time
@@ -292,6 +296,7 @@ func newHarness(asr *callai.FakeTranscriber, llm *callai.FakeAnalyzer) *harness 
 	pass := func(next http.Handler) http.Handler { return next }
 	h.mux = http.NewServeMux()
 	ah := &audioHandler{jobs: h.jobs, records: h.recs, audio: h.audio, now: h.clock, retentionDays: 366}
+	h.audioH = ah
 	register(h.mux, h.recs, pass, ah.enrichDetail)
 	ah.register(h.mux, pass)
 	h.mux.HandleFunc("POST /internal/calls/tick", h.tick.serve)

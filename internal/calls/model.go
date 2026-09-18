@@ -144,6 +144,18 @@ type Record struct {
 	// 값이 없는 경우는 둘 다 **정상**이다: ① 기기 업로드 경로로 저장된 통화(GCS 에 원본이 없다)
 	// ② 보관 기간이 지나 원본이 삭제된 통화. 앱은 값이 없으면 재생 버튼을 잠근다.
 	AudioURL *string `json:"audio_url,omitempty"`
+	// Cost 는 이 통화 한 건에 실제로 든 원가다(응답 전용, **상세에만** 붙는다).
+	//
+	// 🔴 **저장하지 않는다.** 단가는 배포 설정이고 개정된다 — 계산된 금액을 Firestore 에
+	// 넣으면 그 레코드만 옛 단가로 굳은 금액을 영원히 보여 주고, 화면에는 그 사실이
+	// 나타나지 않는다. 조회할 때마다 작업 문서의 사용량으로 다시 계산한다(§cost.go).
+	// listRecord 가 저장 경로에서 이 값을 비우는 것이 그 장치다.
+	// 🔴 **목록(GET /calls)에는 넣지 않는다.** 금액의 근거인 사용량은 작업 문서에만 있어서,
+	// 목록에 실으려면 한 페이지(최대 100건)마다 작업 문서를 그만큼 더 읽어야 한다 —
+	// 비용을 보여 주려고 조회 비용을 100배로 키우는 셈이다(audio_url 과 같은 판단).
+	// nil 인 경우는 셋 다 **정상**이다: ①단가 설정이 없다 ②사용량이 없는 옛 통화다
+	// ③기기 업로드 경로로 저장돼 작업 문서가 없다. 앱은 nil 이면 비용 칸을 그리지 않는다.
+	Cost *Cost `json:"cost,omitempty"`
 }
 
 // appStatus 는 내부 작업 상태(callJobs.state)를 앱이 아는 status 어휘로 사상한다.
@@ -307,7 +319,7 @@ func validateCommon(r *Record, id string) error {
 func validate(r *Record, id string) error {
 	// 🔴 응답 전용 필드가 **요청**에 들어오면 거부한다. Record 주석 참고 —
 	// 이것이 PUT 요청 스키마 동결을 지키는 장치다.
-	if r.JobState != "" || r.Stage != "" || r.HasAudio || r.AudioURL != nil || (r.AI != nil && r.AI.Provider != "") {
+	if r.JobState != "" || r.Stage != "" || r.HasAudio || r.AudioURL != nil || r.Cost != nil || (r.AI != nil && r.AI.Provider != "") {
 		return invalid
 	}
 	if r.Transcript == nil || r.Analysis == nil || r.AI == nil || !r.AI.ProcessedOnDevice {
@@ -354,6 +366,10 @@ func listRecord(r Record) Record {
 	// 🔴 서명 URL 은 만료되는 값이라 **저장 바이트에 절대 들어가면 안 된다.** payload 로
 	// 가는 유일한 길목이 여기이므로 여기서 비운다.
 	r.AudioURL = nil
+	// 🔴 비용도 같은 이유로 저장하지 않는다. 단가는 배포 설정이라 개정되는데, 저장된 금액은
+	// 그때 계산된 값에 그대로 굳는다 — 단가를 고쳐도 옛 통화만 옛 금액을 보여 주고
+	// 그 차이를 설명할 방법이 화면에 없다. 조회할 때마다 사용량으로 다시 계산한다.
+	r.Cost = nil
 	r.Transcript = nil
 	if r.Analysis != nil {
 		r.Summary = strings.Join(strings.Fields(r.Analysis.Summary), " ")

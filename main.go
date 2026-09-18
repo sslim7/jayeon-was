@@ -212,6 +212,9 @@ func callOptions(ctx context.Context) calls.Options {
 		TickCaller:    os.Getenv("CALL_TICK_CALLER"),
 		TickToken:     os.Getenv("CALL_TICK_TOKEN"),
 		TickBatch:     envInt("CALL_TICK_BATCH", 5),
+		// 🔴 단가가 모자라도 여기서 멈추지 않는다. 상세 응답에서 비용 칸만 빠지고
+		// 파이프라인은 그대로 돈다(§internal/calls/cost.go).
+		Pricing: calls.PricingFromEnv(),
 	}
 }
 
