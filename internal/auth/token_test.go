@@ -17,8 +17,8 @@ func TestTokenIssueParseRoundTrip(t *testing.T) {
 		use     string
 		subject string
 	}{
-		{"access", issuer.IssueAccess, TokenUseAccess, "user-1"},
-		{"refresh", func(id string) (string, error) { return issuer.IssueRefresh(id, 0) }, TokenUseRefresh, "user-1"},
+		{"access", func(id string) (string, error) { return issuer.IssueAccess(id, "sess-1") }, TokenUseAccess, "user-1"},
+		{"refresh", func(id string) (string, error) { return issuer.IssueRefresh(id, 0, "sess-1") }, TokenUseRefresh, "user-1"},
 	}
 
 	for _, tc := range cases {
@@ -43,7 +43,7 @@ func TestTokenIssueParseRoundTrip(t *testing.T) {
 func TestTokenRejectsWrongTokenUse(t *testing.T) {
 	issuer := NewTokenIssuer("test-secret")
 
-	access, err := issuer.IssueAccess("user-1")
+	access, err := issuer.IssueAccess("user-1", "sess-1")
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestTokenExpires(t *testing.T) {
 	issuer := NewTokenIssuer("test-secret")
 	issuer.now = func() time.Time { return now }
 
-	access, err := issuer.IssueAccess("user-1")
+	access, err := issuer.IssueAccess("user-1", "sess-1")
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestTokenExpires(t *testing.T) {
 }
 
 func TestTokenRejectsOtherSecret(t *testing.T) {
-	token, err := NewTokenIssuer("secret-a").IssueAccess("user-1")
+	token, err := NewTokenIssuer("secret-a").IssueAccess("user-1", "sess-1")
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestTokenRejectsOtherAlgorithm(t *testing.T) {
 
 func TestTokenRejectsEmptySubject(t *testing.T) {
 	issuer := NewTokenIssuer("test-secret")
-	token, err := issuer.IssueAccess("")
+	token, err := issuer.IssueAccess("", "sess-1")
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}
@@ -153,28 +153,58 @@ func TestTokenTTLs(t *testing.T) {
 func TestRefreshVersionAndUniqueID(t *testing.T) {
 	issuer := NewTokenIssuer("test-secret")
 	issuer.now = func() time.Time { return time.Unix(1800000000, 0) }
-	a, err := issuer.IssueRefresh("user-1", 7)
+	a, err := issuer.IssueRefresh("user-1", 7, "sess-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := issuer.IssueRefresh("user-1", 7)
+	b, err := issuer.IssueRefresh("user-1", 7, "sess-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a == b {
 		t.Fatal("같은 초에 새 리프레시 토큰을 발급하지 않았다")
 	}
-	id, ver, err := issuer.ParseRefresh(a)
-	if err != nil || id != "user-1" || ver != 7 {
-		t.Fatal(id, ver, err)
+	id, ver, sid, err := issuer.ParseRefresh(a)
+	if err != nil || id != "user-1" || ver != 7 || sid != "sess-1" {
+		t.Fatal(id, ver, sid, err)
 	}
-	access, err := issuer.IssueAccess("user-1")
+	access, err := issuer.IssueAccess("user-1", "sess-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	c, err := issuer.parse(access, TokenUseAccess)
 	if err != nil || c.Ver != 0 {
 		t.Fatal(c, err)
+	}
+	// 🔴 액세스 토큰은 **버전은 안 싣고 세션 id 는 싣는다.** 둘을 같이 빼면 세션 목록의
+	// 「지금 이 기기」가 영원히 안 뜨고, 둘을 같이 실으면 매 요청마다 문서를 읽게 된다
+	// (token.go 의 Claims.Sid).
+	uid, asid, err := issuer.ParseAccess(access)
+	if err != nil || uid != "user-1" || asid != "sess-1" {
+		t.Fatal(uid, asid, err)
+	}
+}
+
+// 🔴 세션 장치 이전에 발급된 리프레시 토큰에는 sid 가 없다. ParseRefresh 가 그것을
+// **빈 문자열로 정확히 드러내야** 호출부가 거절할 수 있다. 여기서 빈 값이 아닌 무언가로
+// 채워지면(예: "unknown") 그 값이 세션 조회로 넘어가 엉뚱한 404/401 이 된다.
+func TestParseRefreshWithoutSessionIsEmpty(t *testing.T) {
+	issuer := NewTokenIssuer("test-secret")
+	token, err := issuer.issue("user-1", TokenUseRefresh, RefreshTokenTTL, 3, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ver, sid, err := issuer.ParseRefresh(token)
+	if err != nil || id != "user-1" || ver != 3 || sid != "" {
+		t.Fatal(id, ver, sid, err)
+	}
+}
+
+// 액세스 토큰 수명이 곧 「끊기」가 듣기까지의 시간이다. 이 숫자가 조용히 늘어나면
+// 세션을 끊어도 그만큼 더 쓸 수 있게 되는데, 그 사실은 어떤 테스트에서도 드러나지 않는다.
+func TestAccessTokenTTLIsFifteenMinutes(t *testing.T) {
+	if AccessTokenTTL != 15*time.Minute {
+		t.Fatalf("AccessTokenTTL = %v — 「끊기」의 구멍 크기가 바뀌었다", AccessTokenTTL)
 	}
 }
 
