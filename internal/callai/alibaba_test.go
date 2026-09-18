@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -793,5 +794,80 @@ func TestEmbeddedSchemaIsStrictSafe(t *testing.T) {
 	walk("$", schema)
 	if !strings.Contains(string(callAnalysisSchema), "YYYY-MM-DD") {
 		t.Error("due_date 설명에 형식이 없다")
+	}
+}
+
+// ── 데드라인 분류 회귀 테스트 ──────────────────────────────────────────────────
+//
+// 2026-09-18, 25분짜리 통화가 여기서 깨졌다. http.Client.Timeout(30초)이 끊은 에러가
+// context.DeadlineExceeded 를 만족하는 바람에 「호출부가 취소했다」로 읽혔고, 호출부는
+// 그것을 재시도 불가로 보아 통화를 ANALYSIS_FAILED 로 확정했다. 종료 상태는 스윕 대상이
+// 아니라 그 통화는 사람이 손대기 전까지 영원히 멈춰 있었다.
+
+type fakeTimeoutErr struct{}
+
+func (fakeTimeoutErr) Error() string   { return "fake timeout" }
+func (fakeTimeoutErr) Timeout() bool   { return true }
+func (fakeTimeoutErr) Temporary() bool { return true }
+
+func TestTransportErrorSeparatesWhoseDeadlineExpired(t *testing.T) {
+	alive := context.Background()
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("호출부 ctx 가 죽었으면 공급자 실패가 아니다", func(t *testing.T) {
+		err := transportError(dead, context.Canceled, time.Second)
+		var e *Error
+		if errors.As(err, &e) {
+			// 감싸면 호출부가 「예산 소진」과 「공급자 실패」를 구분할 수 없게 된다.
+			t.Fatalf("호출부 취소를 공급자 에러로 감쌌다: %v", e)
+		}
+	})
+
+	t.Run("ctx 는 살아 있는데 타임아웃이면 진짜 공급자 실패다", func(t *testing.T) {
+		for name, in := range map[string]error{
+			"deadline": context.DeadlineExceeded,
+			"net":      fakeTimeoutErr{},
+		} {
+			err := transportError(alive, in, 30*time.Second)
+			if !Retryable(err) {
+				t.Fatalf("%s: 공급자 타임아웃이 재시도 불가로 분류됐다 — 통화가 버려진다: %v", name, err)
+			}
+			if CodeOf(err) != CodeProviderTimeout {
+				t.Fatalf("%s: code=%s (기대 %s)", name, CodeOf(err), CodeProviderTimeout)
+			}
+			if KindOf(err) != KindRetryable {
+				t.Fatalf("%s: kind=%v", name, KindOf(err))
+			}
+		}
+	})
+}
+
+// 🔴 분류(*Error)가 ctx 검사보다 먼저다. 순서가 뒤집히면 KindRetryable 로 감싼 공급자
+// 타임아웃이 안에 든 context.DeadlineExceeded 때문에 재시도 불가로 뒤집힌다.
+func TestRetryableRespectsWrappedKindOverContextError(t *testing.T) {
+	err := &Error{Kind: KindRetryable, Code: CodeProviderTimeout, Message: "느리다", Err: context.DeadlineExceeded}
+	if !Retryable(err) {
+		t.Fatal("감싼 Kind 가 무시되고 ctx 에러가 이겼다")
+	}
+	perm := &Error{Kind: KindPermanent, Code: "InvalidApiKey"}
+	if Retryable(perm) {
+		t.Fatal("영구 실패를 재시도 대상으로 봤다")
+	}
+	// 맨 ctx 에러는 여전히 「공급자 실패가 아니다」 — 호출부가 판단할 몫이다.
+	if Retryable(context.DeadlineExceeded) {
+		t.Fatal("맨 ctx 에러를 공급자 실패로 봤다")
+	}
+}
+
+// 🔴 진단 정보가 남아야 한다. 사고 당일 로그에는 code=RETRYABLE kind=RETRYABLE 뿐이라
+// 원인을 알아내려면 소스를 거꾸로 읽어야 했다.
+func TestErrorAccessorsExposeDiagnostics(t *testing.T) {
+	err := &Error{Kind: KindRetryable, Code: "Throttling.RateQuota", Status: 429, RequestID: "req-1", Message: "쿼터 초과"}
+	if StatusOf(err) != 429 || MessageOf(err) != "쿼터 초과" || RequestIDOf(err) != "req-1" {
+		t.Fatalf("진단 정보가 꺼내지지 않는다: status=%d msg=%q req=%q", StatusOf(err), MessageOf(err), RequestIDOf(err))
+	}
+	if StatusOf(context.DeadlineExceeded) != 0 || MessageOf(context.DeadlineExceeded) != "" {
+		t.Fatal("callai.Error 가 아닌 에러에서 없는 값을 지어냈다")
 	}
 }

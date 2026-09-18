@@ -372,6 +372,18 @@ func TestPipelineHappyPath(t *testing.T) {
 	if res.Claimed != 1 || res.Advanced != 1 || res.Failed != 0 {
 		t.Fatalf("tick 결과: %+v", res)
 	}
+	// 🔴 폴링에 예산을 쓰고 나면 그 tick 에는 LLM 한 번(llmCallNeed)이 들어가지 않는다.
+	// 그래서 분석은 **다음 tick** 몫이다 — 모자란 예산으로 부르지 않는 것이 이 설계의 핵심이다.
+	// 그 사이 작업은 실패가 아니라 TRANSCRIBED 로 남고 lease 가 풀려 바로 이어진다.
+	if j := h.job(t, "call-1"); j.State != stateTranscribed {
+		t.Fatalf("폴링 뒤 상태 %s (code=%s)", j.State, j.ErrorCode)
+	}
+	if h.llm.Calls != 0 {
+		t.Fatalf("예산이 모자란데 LLM 을 불렀다: %d", h.llm.Calls)
+	}
+	if res = h.runTick(); res.Claimed != 1 || res.Failed != 0 {
+		t.Fatalf("다음 tick 이 분석을 잇지 못했다: %+v", res)
+	}
 	j := h.job(t, "call-1")
 	if j.State != stateCompleted {
 		t.Fatalf("상태 %s (code=%s)", j.State, j.ErrorCode)
@@ -445,7 +457,10 @@ func TestPipelineRetryCap(t *testing.T) {
 		h.advance(maxBackoff + time.Minute)
 	}
 	j := h.job(t, "call-1")
-	if j.State != stateAnalysisFailed || j.ErrorCode != "InternalError" {
+	// 🔴 마지막 공급자 코드(InternalError)가 아니라 **자동 재시도를 다 썼다**가 나가야 한다.
+	// 앱은 이 코드를 그대로 문구로 옮긴다 — 회복 가능한 분류를 그대로 내보내면 화면에
+	// 「잠시 뒤 다시 시도해 주세요」가 뜨는데, 서버는 이미 다섯 번 해 본 뒤다.
+	if j.State != stateAnalysisFailed || j.ErrorCode != codeRetriesExhausted {
 		t.Fatalf("확정 실패가 아니다: %s %s", j.State, j.ErrorCode)
 	}
 	if h.llm.Calls != maxAnalysisAttempts {
@@ -456,7 +471,7 @@ func TestPipelineRetryCap(t *testing.T) {
 		t.Fatalf("끝난 작업을 다시 집었다: %+v", res)
 	}
 	got := decodeRecordBody(t, h.do(t, "GET", "/calls/call-1", "owner-a", ""))
-	if got.Status != "ANALYSIS_FAILED" || got.Error == nil || *got.Error != "InternalError" {
+	if got.Status != "ANALYSIS_FAILED" || got.Error == nil || *got.Error != codeRetriesExhausted {
 		t.Fatalf("실패가 앱에 보이지 않는다: %+v", got)
 	}
 }
@@ -503,6 +518,12 @@ func TestPipelinePermanentFailsImmediately(t *testing.T) {
 		if j.State != stateAnalysisFailed || j.ErrorKind != callai.KindContentFiltered.String() {
 			t.Fatalf("%s kind=%s", j.State, j.ErrorKind)
 		}
+		// 🔴 앱에 나가는 코드는 공급자 문자열(DataInspectionFailed)이 아니라 분류 이름이다.
+		// 공급자 코드를 그대로 내보내면 앱이 뜻을 몰라 「알 수 없는 오류입니다」로 떨어뜨리는데,
+		// 이 통화에 대해 사용자가 알아야 할 사실은 「내용 때문에 공급자가 처리하지 않았다」다.
+		if j.ErrorCode != callai.KindContentFiltered.String() {
+			t.Fatalf("사용자에게 공급자 코드가 그대로 나간다: %s", j.ErrorCode)
+		}
 	})
 }
 
@@ -520,6 +541,8 @@ func TestPipelineInputUnavailableRequeues(t *testing.T) {
 		t.Fatalf("다시 올리기로 되돌아가지 않았다: %s token=%q", j.State, j.ASRToken)
 	}
 	h.advance(2 * time.Minute)
+	h.runTick()
+	// 재업로드 tick 은 폴링에 예산을 써서 분석까지는 못 간다(해피패스 주석 참고).
 	h.runTick()
 	if j = h.job(t, "call-1"); j.State != stateCompleted {
 		t.Fatalf("재업로드 후 완료되지 않았다: %s %s", j.State, j.ErrorCode)
@@ -692,4 +715,214 @@ func decodeRecordBody(t *testing.T, w *httptest.ResponseRecorder) Record {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// ── 예산 회귀 테스트 ───────────────────────────────────────────────────────────
+//
+// 아래 세 테스트는 2026-09-18 사고를 재현하고 그 재발을 막는다. 그날 25분짜리 상담 통화의
+// 첫 서버 분석이, ASR 폴링에 예산을 쓴 tick 이 남은 13초로 LLM 을 부르면서 깨졌다.
+// 돌아온 것은 타임아웃 하나였고, 그것이 「재시도 불가」로 분류되어 통화가 ANALYSIS_FAILED
+// 로 확정됐다. 종료 상태는 스윕 대상이 아니라 그 뒤 매분 도는 tick 은 그 통화를 두 번 다시
+// 집지 않았다 — 사람이 「분석 다시 시도」를 누르기 전까지 영원히 멈춰 있었다.
+
+// 🔴 예산이 모자라면 **공급자를 부르지 않는다.** 그리고 그것은 실패가 아니다.
+func TestPipelineDefersStepWhenBudgetShort(t *testing.T) {
+	// 폴링 3회 = 가짜 시계로 15초. 남는 예산이 llmCallNeed(45초)에 못 미친다 —
+	// 사고 당일과 같은 모양이다(ASR 이 예산을 쓰고 LLM 차례가 왔다).
+	h := newHarness(&callai.FakeTranscriber{Polls: 3, Result: fakeResult()}, &callai.FakeAnalyzer{})
+	h.enqueue(t, "owner-a", "call-1")
+
+	res := h.runTick()
+	j := h.job(t, "call-1")
+
+	// ① 모자란 예산으로 공급자를 부르지 않았다. 부르면 요금은 나가고 결과는 못 받는다.
+	if h.llm.Calls != 0 {
+		t.Fatalf("예산이 모자란데 LLM 을 불렀다: %d회", h.llm.Calls)
+	}
+	// ② 종료 상태로 가지 않았다. 갔다면 다음 tick 이 영원히 집지 않는다.
+	if terminalStates[j.State] {
+		t.Fatalf("예산 부족을 확정 실패로 처리했다: %s (code=%s)", j.State, j.ErrorCode)
+	}
+	if j.State != stateTranscribed {
+		t.Fatalf("상태가 전사 완료로 남아 있지 않다: %s", j.State)
+	}
+	// ③ 시도 횟수를 쓰지 않았다. 부르지도 않은 호출이 상한을 갉아먹으면 안 된다
+	//    (그 상한은 곧 우리가 지불할 금액의 상한이다).
+	if j.AnalysisAttempt != 0 {
+		t.Fatalf("부르지도 않고 시도 횟수를 썼다: %d", j.AnalysisAttempt)
+	}
+	if j.ErrorCode != "" || j.ErrorKind != "" {
+		t.Fatalf("미룸이 실패로 기록됐다: code=%s kind=%s", j.ErrorCode, j.ErrorKind)
+	}
+	if res.Failed != 0 {
+		t.Fatalf("미룸이 실패로 집계됐다: %+v", res)
+	}
+	// 🔴 사용자 화면은 「분석 중」을 유지해야 한다. 자동으로 회복될 일에 실패 문구나
+	// 재시도 버튼을 띄우면, 사용자는 서버가 이미 하고 있는 일을 손으로 누르게 된다.
+	got := decodeRecordBody(t, h.do(t, "GET", "/calls/call-1", "owner-a", ""))
+	if got.Status != "ANALYZING" || got.Error != nil {
+		t.Fatalf("미루는 동안 앱에 실패가 보인다: status=%s error=%v stage=%q", got.Status, got.Error, got.Stage)
+	}
+
+	// ④ lease 가 풀려 다음 tick 이 **바로** 집는다. 풀지 않으면 lease 만료(2분)까지 논다.
+	if j.NextAttemptAt.After(h.clock()) {
+		t.Fatalf("lease 가 풀리지 않았다: %v > %v", j.NextAttemptAt, h.clock())
+	}
+	if next := h.runTick(); next.Claimed != 1 {
+		t.Fatalf("다음 tick 이 미뤄진 작업을 집지 않았다: %+v", next)
+	}
+	if h.llm.Calls != 1 {
+		t.Fatalf("다음 tick 이 분석을 잇지 않았다: %d회", h.llm.Calls)
+	}
+	if j = h.job(t, "call-1"); j.State != stateCompleted {
+		t.Fatalf("이어받은 tick 이 끝내지 못했다: %s (code=%s)", j.State, j.ErrorCode)
+	}
+	// 🔴 전사를 다시 하지 않았다. 미루기가 ASR 을 되돌리면 요금이 그대로 두 배다.
+	if h.asr.StartCalls != 1 {
+		t.Fatalf("미룬 뒤 전사를 다시 시작했다: %d회", h.asr.StartCalls)
+	}
+}
+
+// 🔴 **공급자 타임아웃은 진짜 실패다.** 예산 부족(위 테스트)과 달리 시도 횟수를 쓰고
+// 백오프를 건다. 둘을 같은 것으로 다루면, 답하지 않는 공급자를 상한 없이 계속 부르거나
+// (한쪽으로 뭉개면) 멀쩡한 통화를 재시도 없이 버린다(다른 쪽으로 뭉개면 — 2026-09-18).
+func TestPipelineProviderTimeoutConsumesAttemptAndBacksOff(t *testing.T) {
+	// 사고 당일 공급자 계층이 올려보낸 것과 같은 맨 에러다. 이것이 *callai.Error 로
+	// 감싸이지 않으면 callai.Retryable 이 false 를 돌려주고 통화가 확정 실패한다.
+	h := newHarness(
+		&callai.FakeTranscriber{Result: fakeResult()},
+		&callai.FakeAnalyzer{Err: context.DeadlineExceeded, FailTimes: 1},
+	)
+	h.enqueue(t, "owner-a", "call-1")
+	h.runTick()
+
+	j := h.job(t, "call-1")
+	if terminalStates[j.State] {
+		t.Fatalf("타임아웃 한 번으로 통화를 버렸다: %s (code=%s)", j.State, j.ErrorCode)
+	}
+	// 전사문은 그대로 두고 분석만 다시 한다 — ASR 이 가장 비싼 단계다.
+	if j.State != stateTranscribed {
+		t.Fatalf("분석 재시도 상태가 아니다: %s", j.State)
+	}
+	if j.AnalysisAttempt != 1 {
+		t.Fatalf("공급자 실패인데 시도 횟수를 쓰지 않았다: %d", j.AnalysisAttempt)
+	}
+	if j.ErrorCode != callai.CodeProviderTimeout {
+		t.Fatalf("타임아웃이 공급자 타임아웃으로 분류되지 않았다: code=%s kind=%s", j.ErrorCode, j.ErrorKind)
+	}
+	// 예산 부족은 곧바로(now) 다시 집지만, 진짜 실패는 백오프를 둔다.
+	if want := h.clock().Add(backoff(1)); !j.NextAttemptAt.Equal(want) {
+		t.Fatalf("백오프가 걸리지 않았다: %v (기대 %v)", j.NextAttemptAt, want)
+	}
+	// 🔴 자동으로 회복될 실패는 사용자에게 알리지 않는다.
+	got := decodeRecordBody(t, h.do(t, "GET", "/calls/call-1", "owner-a", ""))
+	if got.Status != "ANALYZING" || got.Error != nil {
+		t.Fatalf("재시도 중인데 앱에 실패가 보인다: status=%s error=%v", got.Status, got.Error)
+	}
+
+	h.advance(backoff(1))
+	h.runTick()
+	if j = h.job(t, "call-1"); j.State != stateCompleted {
+		t.Fatalf("백오프 뒤 재시도가 끝내지 못했다: %s (code=%s)", j.State, j.ErrorCode)
+	}
+	if h.asr.StartCalls != 1 {
+		t.Fatalf("분석 재시도가 전사를 다시 했다: %d회", h.asr.StartCalls)
+	}
+}
+
+// ⚠️ 미루기에는 상한이 있어야 한다. 상한이 없으면 「예산에 영영 들어가지 않는 단계」가
+// 매 tick 조회·쓰기만 하며 영원히 돈다 — 화면에는 「내용 정리하는 중」이 계속 떠 있어서
+// 확정 실패보다 알아채기 어렵다.
+func TestPipelineDeferHasCap(t *testing.T) {
+	h := newHarness(&callai.FakeTranscriber{Result: fakeResult()}, &callai.FakeAnalyzer{})
+	h.enqueue(t, "owner-a", "call-1")
+	// 전사는 들어가지만 분석(llmCallNeed)은 빈 tick 이어도 들어가지 않는 예산이다.
+	// 「공급자가 느려져 우리 예산을 넘어선」 상황이 이 모양이다.
+	short := asrStartNeed + time.Second
+	for i := 0; i < maxDefers; i++ {
+		h.tick.run(context.Background(), h.clock().Add(short))
+		j := h.job(t, "call-1")
+		if terminalStates[j.State] {
+			t.Fatalf("%d번째 미룸에서 이미 종료 상태다: %s", i+1, j.State)
+		}
+		if j.DeferCount != i+1 {
+			t.Fatalf("%d번째 미룸인데 미룬횟수=%d", i+1, j.DeferCount)
+		}
+		// 상한에 닿기 전까지 사용자 화면은 진행 중이다.
+		got := decodeRecordBody(t, h.do(t, "GET", "/calls/call-1", "owner-a", ""))
+		if got.Status != "ANALYZING" || got.Error != nil {
+			t.Fatalf("%d번째 미룸에서 앱에 실패가 보인다: status=%s error=%v", i+1, got.Status, got.Error)
+		}
+	}
+	// 상한을 넘으면 사람이 볼 수 있는 종료 상태로 세운다.
+	h.tick.run(context.Background(), h.clock().Add(short))
+	j := h.job(t, "call-1")
+	if j.State != stateAnalysisFailed || j.ErrorCode != "BUDGET_TOO_SMALL" {
+		t.Fatalf("미루기 상한이 동작하지 않았다: %s (code=%s, 미룬횟수=%d)", j.State, j.ErrorCode, j.DeferCount)
+	}
+	// 🔴 그 사이 공급자는 한 번도 부르지 않았다.
+	if h.llm.Calls != 0 {
+		t.Fatalf("예산이 없는데 LLM 을 불렀다: %d회", h.llm.Calls)
+	}
+}
+
+// 앞 통화가 예산을 써서 밀린 것은 **세지 않는다.** 이것까지 세면 큐가 밀리는 날
+// 멀쩡한 통화가 줄줄이 확정 실패한다.
+func TestPipelineDeferNotCountedWhenTickWasBusy(t *testing.T) {
+	h := newHarness(&callai.FakeTranscriber{Polls: 3, Result: fakeResult()}, &callai.FakeAnalyzer{})
+	h.enqueue(t, "owner-a", "call-1")
+	h.runTick() // 폴링으로 예산을 쓰고 분석을 미룬다
+	if j := h.job(t, "call-1"); j.DeferCount != 0 {
+		t.Fatalf("정상적인 밀림을 실패로 셌다: 미룬횟수=%d", j.DeferCount)
+	}
+}
+
+// 🔴 2026-09-18 에 운영에 멈춘 통화 한 건(ANALYSIS_FAILED)이 「분석 다시 시도」로 되살아나는지.
+// 이 경로가 막혀 있으면 이미 벌어진 사고를 사람이 손으로도 못 푼다.
+func TestReanalyzeRecoversFromAnalysisFailed(t *testing.T) {
+	h := newHarness(
+		&callai.FakeTranscriber{Result: fakeResult()},
+		// 상한까지 실패시켜 사고 당일과 같은 종료 상태를 만든다.
+		&callai.FakeAnalyzer{Err: callai.FakeError(callai.KindRetryable, "InternalError"), FailTimes: maxAnalysisAttempts},
+	)
+	h.enqueue(t, "owner-a", "call-1")
+	for i := 0; i < maxAnalysisAttempts+1; i++ {
+		h.runTick()
+		h.advance(maxBackoff + time.Minute)
+	}
+	j := h.job(t, "call-1")
+	if j.State != stateAnalysisFailed {
+		t.Fatalf("선행 조건 실패: %s (code=%s)", j.State, j.ErrorCode)
+	}
+	shards, calls := j.TranscriptShards, h.llm.Calls
+	if shards == 0 {
+		t.Fatal("전사문이 남아 있지 않다 — 재분석할 원문이 없다")
+	}
+
+	if w := h.do(t, "POST", "/calls/call-1/reanalyze", "owner-a", ""); w.Code != 200 {
+		t.Fatalf("재분석 요청이 거절됐다: %d %s", w.Code, w.Body.String())
+	}
+	j = h.job(t, "call-1")
+	if j.State != stateTranscribed || j.AnalysisAttempt != 0 || j.DeferCount != 0 || j.ErrorCode != "" {
+		t.Fatalf("재분석 예약 상태가 아니다: state=%s attempt=%d defer=%d code=%s", j.State, j.AnalysisAttempt, j.DeferCount, j.ErrorCode)
+	}
+	// 🔴 전사문을 그대로 쓴다. 여기서 ASR 을 다시 돌리면 요금이 통째로 두 배다.
+	if j.TranscriptShards != shards {
+		t.Fatalf("전사문을 버렸다: %d → %d", shards, j.TranscriptShards)
+	}
+
+	h.runTick()
+	if j = h.job(t, "call-1"); j.State != stateCompleted {
+		t.Fatalf("재분석이 끝나지 않았다: %s (code=%s)", j.State, j.ErrorCode)
+	}
+	if h.asr.StartCalls != 1 {
+		t.Fatalf("재분석이 전사를 다시 했다: %d회", h.asr.StartCalls)
+	}
+	if h.llm.Calls != calls+1 {
+		t.Fatalf("분석 호출 수가 맞지 않는다: %d → %d", calls, h.llm.Calls)
+	}
+	got := decodeRecordBody(t, h.do(t, "GET", "/calls/call-1", "owner-a", ""))
+	if got.Status != "COMPLETED" || got.Error != nil || got.Analysis == nil {
+		t.Fatalf("되살아난 통화가 앱에 완료로 보이지 않는다: status=%s error=%v", got.Status, got.Error)
+	}
 }

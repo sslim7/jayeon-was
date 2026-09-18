@@ -139,7 +139,7 @@ func TestTickStopsAtBudgetAndResumesNextTick(t *testing.T) {
 		t.Fatalf("폴링 상태가 저장되지 않았다: %s token=%q", j.State, j.ASRToken)
 	}
 	// 다음 폴링 한 번(대기 + 호출 여유)이 안 들어갈 만큼만 남기고 멈춰야 한다.
-	if res.RemainingBudgetMS > int64((pollWait+stepReserve)/time.Millisecond) {
+	if res.RemainingBudgetMS > int64((pollWait+minStepBudget)/time.Millisecond) {
 		t.Fatalf("예산을 남기고 멈췄다: %d ms", res.RemainingBudgetMS)
 	}
 	polled := h.asr.PollCalls

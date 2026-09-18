@@ -295,6 +295,10 @@ func (h *audioHandler) reanalyze(w http.ResponseWriter, r *http.Request, uid, id
 	j.Progress = progressOf(stateTranscribed)
 	j.HasAnalysis = false
 	j.AnalysisAttempt = 0
+	// 🔴 미루기 횟수도 되돌린다. 예산 부족 상한(maxDefers)에 걸려 멈춘 작업을 사람이 다시
+	// 돌릴 때 이것이 남아 있으면, 첫 미룸에서 곧바로 같은 자리로 되돌아간다 —
+	// 버튼을 눌러도 아무 일도 일어나지 않는 것처럼 보인다.
+	j.DeferCount = 0
 	j.ErrorCode, j.ErrorKind, j.ErrorAt = "", "", time.Time{}
 	j.UpdatedAt = now
 	j.NextAttemptAt = now

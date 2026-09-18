@@ -53,6 +53,18 @@ const (
 	maxAnalysisAttempts = 5
 	// maxBackoff 는 재시도 간격 상한이다.
 	maxBackoff = 30 * time.Minute
+	// maxDefers 는 「예산이 모자라 단계를 미루기」를 몇 번까지 봐주는가다.
+	//
+	// 🔴 미루기는 실패가 아니므로 시도 횟수(maxASRAttempts/maxAnalysisAttempts)를 쓰지 않는다.
+	// 그래서 별도의 상한이 없으면 **영원히 미루기만 하는 작업**이 매 tick 조회·쓰기 비용만
+	// 쓰면서 도는 상태가 만들어진다. 사용자 화면에는 「내용 정리하는 중」이 영원히 떠 있고
+	// 아무도 그게 멈춘 줄 모른다 — 확정 실패보다 알아채기 어려운 고장이다.
+	//
+	// ⚠️ 세는 조건이 좁다는 점이 중요하다. pipeline.deferStep 은 **빈 tick 이어도 그 단계가
+	// 들어가지 않을 때만** 이 횟수를 올린다. 앞 통화가 예산을 써서 밀린 것은 세지 않는다.
+	// 그래서 이 상한에 걸렸다는 것은 곧 「예산 상수가 현실과 맞지 않는다」는 뜻이고,
+	// 다섯 번(≈5분)이면 로그로 알아보기에 충분하다.
+	maxDefers = 5
 )
 
 // 작업 상태. 🔴 이 값을 그대로 API 로 내보내지 마라 — appStatus 로 사상해야 한다.
@@ -200,6 +212,11 @@ type job struct {
 
 	TranscriptShards int  `firestore:"transcriptShards"`
 	HasAnalysis      bool `firestore:"hasAnalysis"`
+
+	// DeferCount 는 예산이 모자라 단계를 미룬 횟수다(maxDefers 주석 참고).
+	// 공급자가 한 번이라도 답하면 0 으로 되돌린다 — 누적 통계가 아니라
+	// 「영영 들어가지 못하는 단계」를 잡기 위한 연속 카운터다.
+	DeferCount int `firestore:"deferCount"`
 }
 
 // fields 는 작업 문서 본문이다. 전체 Set 으로 쓴다.
@@ -227,7 +244,7 @@ func (j *job) fields() map[string]any {
 		"llmModel": j.LLMModel, "promptVersion": j.PromptVersion,
 		"usage":     map[string]any{"audioSeconds": j.Usage.AudioSeconds, "promptTokens": j.Usage.PromptTokens, "completionTokens": j.Usage.CompletionTokens, "reasoningTokens": j.Usage.ReasoningTokens},
 		"errorCode": j.ErrorCode, "errorKind": j.ErrorKind, "nextAttemptAt": j.NextAttemptAt,
-		"transcriptShards": j.TranscriptShards, "hasAnalysis": j.HasAnalysis,
+		"transcriptShards": j.TranscriptShards, "hasAnalysis": j.HasAnalysis, "deferCount": j.DeferCount,
 	}
 	if !j.ErrorAt.IsZero() {
 		m["errorAt"] = j.ErrorAt

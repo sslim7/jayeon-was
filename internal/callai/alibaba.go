@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -198,9 +199,10 @@ func (c *alibabaClient) newRequest(ctx context.Context, method, path string, bod
 // 🔴 2xx 라고 성공이 아니다. DashScope 는 200 에 top-level `code` 를 실어 실패를 알리는
 // 경로가 있어서, status 와 code 를 둘 다 본 뒤에야 성공으로 친다.
 func (c *alibabaClient) doJSON(req *http.Request, out any) error {
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return transportError(err)
+		return transportError(req.Context(), err, time.Since(start))
 	}
 	defer resp.Body.Close()
 
@@ -216,7 +218,7 @@ func (c *alibabaClient) doJSON(req *http.Request, out any) error {
 		if errors.Is(rerr, errBodyTooLarge) {
 			return &Error{Kind: KindPermanent, Code: "ResponseTooLarge", Status: resp.StatusCode, RequestID: headerRequestID(resp), Message: "공급자 응답이 상한을 넘었다"}
 		}
-		return transportError(rerr)
+		return transportError(req.Context(), rerr, time.Since(start))
 	}
 	var env apiEnvelope
 	_ = json.Unmarshal(body, &env)
@@ -278,13 +280,52 @@ func newAPIError(status int, headerReqID string, body []byte) *Error {
 	}
 }
 
-// transportError 는 네트워크 계층 실패를 재시도 대상으로 옮긴다.
-// 호출부가 취소한 경우는 재시도가 아니라 중단이므로 ctx 에러를 그대로 올려보낸다.
-func transportError(err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// transportError 는 네트워크 계층 실패를 분류한다.
+//
+// # 🔴 데드라인은 **누구 것이었는지**에 따라 뜻이 완전히 다르다
+//
+// 이 자리에서 `context.DeadlineExceeded` 하나로 뭉뚱그리면 2026-09-18 사고가 그대로
+// 재현된다. 그날 25분짜리 통화가 확정 실패로 버려진 경로가 정확히 여기였다 —
+// http.Client.Timeout(30초)이 끊은 에러가 `errors.Is(err, context.DeadlineExceeded)` 를
+// 만족하는 바람에 위 코드가 그것을 「호출부가 취소했다」로 읽었고, internal/calls 의
+// Retryable() 이 false 를 돌려주면서 재시도 한 번 없이 ANALYSIS_FAILED 로 확정됐다.
+// 종료 상태는 스윕 대상이 아니라 그 통화는 사람이 손대기 전까지 영원히 멈춰 있었다.
+//
+// 구분 기준은 **ctx 가 살아 있는가** 하나다:
+//
+//   - ctx 가 죽었다 = 호출부(tick 예산, Cloud Run 요청)가 끊었다. 공급자 실패가 아니므로
+//     ctx 에러를 그대로 올려보내 호출부가 「시도 횟수를 쓰지 않고 다음 tick 에 넘기는」
+//     판단을 할 수 있게 한다.
+//   - ctx 는 살아 있는데 타임아웃이다 = **우리가 준 시간 안에 공급자가 답하지 못했다.**
+//     이건 진짜 실패다. KindRetryable 로 감싸 올려보내면 호출부가 시도 횟수를 소모하고
+//     백오프를 건다. 감싸지 않으면(= 맨 ctx 에러로 두면) 위의 사고가 되풀이된다.
+//
+// ⚠️ 두 데드라인이 같은 순간에 끊기는 경쟁이 이론상 있다. 그때는 호출부 쪽으로 읽히는데,
+// 그쪽이 안전한 오독이다 — 통화를 버리지 않고 다음 tick 이 다시 집는다.
+func transportError(ctx context.Context, err error, elapsed time.Duration) error {
+	if ctx.Err() != nil {
 		return err
 	}
+	if errors.Is(err, context.Canceled) {
+		// ctx 는 멀쩡한데 취소됐다 = 우리가 만든 자식 ctx 가 끊긴 것이다. 호출부가 판단한다.
+		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		return &Error{
+			Kind: KindRetryable, Code: CodeProviderTimeout,
+			Message: fmt.Sprintf("공급자가 %.1f초 안에 응답하지 않았다", elapsed.Seconds()),
+			Err:     err,
+		}
+	}
 	return &Error{Kind: KindRetryable, Code: "Transport", Message: "공급자에 연결하지 못했다", Err: err}
+}
+
+// isTimeout 은 net 계층이 타임아웃이라고 말하는 에러를 잡는다.
+// http.Client.Timeout 이 끊은 에러는 Go 버전에 따라 context.DeadlineExceeded 를 감싸기도
+// 하고 net.Error.Timeout() 으로만 드러나기도 한다 — 둘 다 본다.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func headerRequestID(resp *http.Response) string {
