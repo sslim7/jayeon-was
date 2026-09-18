@@ -216,9 +216,10 @@ func (c *alibabaClient) uploadAudio(ctx context.Context, p *uploadPolicy, key st
 		return &Error{Kind: KindPermanent, Code: "BadUploadURL", Message: "업로드 URL 을 만들지 못했다", Err: err}
 	}
 	req.Header.Set("Content-Type", contentType)
+	start := time.Now()
 	resp, err := c.upload.Do(req)
 	if err != nil {
-		return transportError(err)
+		return transportError(ctx, err, time.Since(start))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -426,9 +427,10 @@ func (c *alibabaClient) fetchTranscript(ctx context.Context, task asrTaskRespons
 		return nil, &Error{Kind: KindPermanent, Code: "BadTranscriptionURL", RequestID: task.RequestID, Message: "전사 결과 URL 을 해석하지 못했다", Err: err}
 	}
 	// 서명이 URL 에 들어 있다. Authorization 헤더를 붙이면 오히려 거절당한다.
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, transportError(err)
+		return nil, transportError(ctx, err, time.Since(start))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -446,7 +448,7 @@ func (c *alibabaClient) fetchTranscript(ctx context.Context, task asrTaskRespons
 		if errors.Is(rerr, errBodyTooLarge) {
 			return nil, &Error{Kind: KindPermanent, Code: "TranscriptTooLarge", RequestID: task.RequestID, Message: "전사 결과가 상한을 넘었다"}
 		}
-		return nil, transportError(rerr)
+		return nil, transportError(ctx, rerr, time.Since(start))
 	}
 	return parseTranscription(body, task.RequestID)
 }

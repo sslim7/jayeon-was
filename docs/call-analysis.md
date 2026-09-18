@@ -119,7 +119,11 @@ AWAITING_UPLOAD → QUEUED → ASR_RUNNING → ASR_POLLING ⇄ ASR_POLLING → T
 - 간격: `1m, 2m, 4m, 8m, 16m`, 상한 `30m`.
 - 🔴 **시도 상한은 단계별로 다르다: ASR 3회, 분석 5회.** 공급자는 모르는 실패 코드를 `Retryable` 로 돌려주므로 **이 상한이 곧 우리가 지불하는 금액의 상한**이다. ASR 은 과금 단위가 오디오 초라 1시간 통화를 5번 재시도하면 5시간치 요금이 나간다. 분석은 저장된 전사문을 재사용하므로 훨씬 싸다.
 - `callai.Retryable(err) == false` 면 **즉시** 확정 실패한다(재시도 낭비 금지). `KindContentFiltered` 도 즉시 확정이되 분류를 따로 남겨 사용자 안내 문구를 나눌 수 있게 한다.
+- 🔴 **데드라인은 누구 것이었는지로 갈린다.** ①tick 예산·요청 취소(우리 쪽)는 실패가 아니다 — 상태와 시도 횟수를 그대로 두고 lease 만 풀어 다음 tick 에 넘긴다. ②공급자가 우리가 준 시간 안에 답하지 못한 것은 진짜 실패다 — `*callai.Error{Kind: KindRetryable, Code: "ProviderTimeout"}` 로 감싸여 시도 횟수를 쓰고 백오프가 걸린다. 2026-09-18 에 이 둘이 한 줄 `errors.Is(err, context.DeadlineExceeded)` 에 뭉개져 25분짜리 통화가 재시도 한 번 없이 `ANALYSIS_FAILED` 로 확정됐다.
+- 🔴 **`callai.Retryable` 은 분류(`*callai.Error`)를 ctx 검사보다 먼저 본다.** 순서를 뒤집으면 KindRetryable 로 감싼 공급자 타임아웃이 안에 든 `context.DeadlineExceeded` 때문에 재시도 불가로 뒤집힌다.
 - `KindInputUnavailable` 은 공급자가 우리 오디오를 받아 가지 못했다는 뜻이라 폴링을 이어가 봐야 끝나지 않는다. `QUEUED` 로 되돌려 처음부터 다시 올린다(단 ASR 시도 상한은 그대로 적용).
+- 🔴 **자동으로 회복 가능한 실패는 사용자에게 노출하지 않는다.** 재시도 예약 중에는 상태가 종료 상태가 아니므로 통화 레코드의 `error` 가 비어 나가고, 앱은 「분석 중」을 그대로 보여 준다. 사용자는 화면을 나가도 되고 돌아왔을 때 진행돼 있으면 된다. `summaryRecord()` 가 **종료 상태에서만** `error` 를 채우는 것이 그 약속이다 — 그 조건을 넓히지 마라.
+- 🔴 **종료 상태의 코드는 「사용자가 할 수 있는 일」을 말해야 한다.** 회복 가능한 실패를 상한까지 시도하고 멈췄으면 마지막 공급자 코드가 아니라 `RETRIES_EXHAUSTED` 를 내보낸다. 마지막 공급자 코드를 그대로 내보내면 앱이 그것을 「일시적인 오류입니다. 잠시 뒤 다시 시도해 주세요」로 옮기는데, 서버는 이미 다 해 본 뒤라 사용자에게 떠넘기는 말이 된다(2026-09-18 에 실제로 화면에 뜬 문구다). 마지막 공급자 코드·HTTP status·request_id 는 로그와 작업 문서에 남는다.
 - 🔴 **누적 사용량(`usage.audioSeconds` 등)은 재시도분까지 전부 더해 작업 문서에 남긴다.** 실패한 시도의 요금도 실제로 청구되므로, 성공분만 기록하면 원가 집계가 청구서와 어긋나고 그 차이는 아무도 설명하지 못한다.
 
 ### 🔴 분석을 먼저 저장하고 통화 레코드를 나중에 확정하는 순서
@@ -147,9 +151,32 @@ Cloud Run 서비스가 `allow_unauthenticated = true` 다. **Cloud Run IAM 은 �
 
 Cloud Run 이 `timeout 60s` / `cpu_idle = true` / `min_instances = 0` 이다. **응답을 보낸 뒤 계속 도는 고루틴은 금지다** — 응답 직후 CPU 가 스로틀돼 뒤에서 돌던 작업이 로그 한 줄 없이 조용히 끊긴다. 모든 일은 요청 안에서 끝나고, 못 끝낸 것은 상태로 저장해 다음 tick 에 넘긴다.
 
-tick 은 50초를 쓰고 10초를 상태 저장·응답에 남긴다. 한 작업을 예산이 허락하는 한 여러 단계 전진시키되(Start → 5초 대기 → Poll → … → TRANSCRIBED → ANALYZING → COMPLETED), 남은 예산이 모자라면 상태를 저장하고 반환한다. 폴링 사이 대기는 `time.Sleep` 이 아니라 `ctx` 를 존중하는 타이머다.
+tick 은 50초를 쓰고 나머지를 상태 저장·응답에 남긴다. 한 작업을 예산이 허락하는 한 여러 단계 전진시키되(Start → 5초 대기 → Poll → … → TRANSCRIBED → ANALYZING → COMPLETED), 남은 예산이 모자라면 상태를 저장하고 반환한다. 폴링 사이 대기는 `time.Sleep` 이 아니라 `ctx` 를 존중하는 타이머다.
 
 예산이 모자라 멈춘 작업은 lease 를 바로 풀어 다음 tick 이 이어받게 한다. 풀지 않으면 lease 만료(2분)까지 그 통화가 놀게 된다.
+
+#### 🔴 남은 예산이 모자라면 공급자를 아예 부르지 않는다
+
+단계마다 필요한 시간이 다르다. 하나의 상수로 판단하면 **가장 오래 걸리는 단계가 조용히 먼저 깨진다** — 2026-09-18 에 ASR 폴링에 예산을 쓴 tick 이 남은 13초로 LLM 을 불렀고, 돌아온 것은 타임아웃뿐이었다.
+
+| 상수 | 값 | 무엇 |
+|---|---|---|
+| `tickBudget` | 50s | 한 tick 이 쓰는 시간 |
+| `tailReserve` | 3s | 응답을 쓸 시간 |
+| `saveReserve` | 5s | 공급자 호출이 끝난 뒤 **결과를 저장할** 시간 |
+| `asrStartNeed` | 30s | 업로드 정책 + 오디오 전체 업로드 + 전사 제출 |
+| `asrPollNeed` | 15s | 작업 조회 + 완료 시 전사 결과 내려받기 |
+| `llmCallNeed` | 45s | 전사문 정리(창 40s + `saveReserve`) |
+| `leaseDuration` | 2m | lease |
+| `CALL_AI_TIMEOUT_SECONDS` | 50s | 공급자 HTTP backstop |
+
+지켜야 하는 관계: `leaseDuration > tickBudget`, `tickBudget < Cloud Run(60s) − tailReserve`, `tickBudget ≥ llmCallNeed`, `CALL_AI_TIMEOUT_SECONDS > tickBudget − saveReserve`(= 우리가 거는 최대 창 45s).
+
+🔴 `llmCallNeed` 는 **실측에서 나왔다.** `internal/callai/live_test.go` 의 `TestLiveAnalyzeLatency` 로 25분 분량(프롬프트 60KB / 15.6k 토큰) 합성 전사문을 `qwen3.7-plus` 에 넣어 잰 값이 28.5s / 29.8s / 33.6s 이고, 50분 분량(30.5k 토큰)도 31.1s / 32.3s 다(지연은 입력 길이보다 **출력 토큰 수**가 지배한다). `thinking_budget=0` 이면 13.0s / 13.5s 로 떨어진다. **모델·프롬프트·thinking 설정을 바꾸면 다시 재고 이 값을 고쳐야 한다.**
+
+예산이 모자라 시작하지 못한 단계는 **실패가 아니다**: 상태·시도 횟수를 그대로 두고 lease 만 풀어 다음 tick 에 넘긴다(`nextAttemptAt` 오름차순이라 다음 tick 이 먼저 집는다). 앱에는 「분석 중」이 그대로 유지된다.
+
+⚠️ 무한 미루기는 `deferCount`/`maxDefers`(5)가 막는다. 세는 조건은 **「빈 tick 이어도 그 단계가 들어가지 않을 때」뿐이다** — 앞 통화가 예산을 써서 밀린 것까지 세면 큐가 밀리는 날 멀쩡한 통화가 줄줄이 확정 실패한다. 상한을 넘으면 `BUDGET_TOO_SMALL` 로 종료 상태에 세운다(사람이 예산 상수나 Cloud Run 타임아웃을 손봐야 한다는 뜻이다).
 
 응답: `{"claimed":n,"advanced":n,"failed":n,"remaining_budget_ms":n}` — 🔴 **통화 내용은 한 글자도 넣지 않는다.**
 
@@ -189,7 +216,7 @@ fs.Collection("callJobs").
 
 🔴 **이 이름을 바꾸면 안 된다.** `google_firestore_field` 의 `collection` 인자는 **컬렉션 그룹 ID** 이고, 컬렉션 그룹 ID 는 경로의 **마지막 세그먼트** 이름이다. 기존 면제가 `{calls:record, transcript:data, analysis:data, todos:data}` 로 걸려 있으므로 `callJobs/{id}/transcript/{i}` 와 `callJobs/{id}/analysis/v1` 에도 **그대로 적용된다**(terraform 변경이 필요 없다). 이름을 바꾸면 면제가 안 먹고, 그 증상은 운영에서만 나는 쓰기 거부다.
 
-작업 문서 본문 필드(전부 작은 값): `uid`, `callId`, `status`(내부 상태), `stage`, `progress`, `audio{bucket,object,size,contentType,fileName}`, 연락처·통화 메타, `createdAt`/`updatedAt`, `nextAttemptAt`, `asrAttempt`/`analysisAttempt`, `asrToken`, `asrRequestId`/`llmRequestId`, 공급자·모델·프롬프트 버전, `usage{...}`, `errorCode`/`errorKind`/`errorAt`, `transcriptShards`, `hasAnalysis`.
+작업 문서 본문 필드(전부 작은 값): `uid`, `callId`, `status`(내부 상태), `stage`, `progress`, `audio{bucket,object,size,contentType,fileName}`, 연락처·통화 메타, `createdAt`/`updatedAt`, `nextAttemptAt`, `asrAttempt`/`analysisAttempt`, `asrToken`, `asrRequestId`/`llmRequestId`, 공급자·모델·프롬프트 버전, `usage{...}`, `errorCode`/`errorKind`/`errorAt`, `transcriptShards`, `hasAnalysis`, `deferCount`.
 
 🔴 Firestore 필드 `status` 와 **API 응답의 `status` 는 같은 단어지만 값 집합이 완전히 다르다**(아래 사상표 참고).
 

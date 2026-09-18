@@ -30,8 +30,30 @@ import (
 // # 예산
 //
 // Cloud Run 요청 타임아웃이 60초이고 Scheduler attempt_deadline 도 60초다. 우리는 50초를
-// 쓰고 10초를 상태 저장·응답에 남긴다. 한 작업을 예산이 허락하는 한 여러 단계 전진시키되,
-// 남은 예산이 모자라면 상태를 저장하고 반환한다 — 다음 tick 이 이어서 폴링한다.
+// 쓰고 나머지를 상태 저장·응답에 남긴다. 한 작업을 예산이 허락하는 한 여러 단계 전진시키되,
+// 남은 예산이 모자라면 **그 단계를 시작하지 않고** 상태를 저장하고 반환한다 —
+// 다음 tick 이 이어서 한다.
+//
+// # 🔴 단계마다 필요한 시간이 다르다
+//
+// 2026-09-18, 25분짜리 상담 통화의 첫 서버 분석이 여기서 깨졌다. 그때는 「한 단계 더 갈 수
+// 있는가」를 stepReserve 하나(12초)로 판단했는데, ASR 폴링은 12초로 충분해도 전사문을
+// 정리하는 LLM 호출은 **30초 안팎이 걸린다**(합성 25분 전사문 실측 28.5~33.6초,
+// internal/callai/live_test.go 의 TestLiveAnalyzeLatency). 남은 13초로 LLM 을 부른 결과는
+// 타임아웃 하나였고, 그 타임아웃이 확정 실패로 분류되어 통화가 통째로 버려졌다.
+// 그래서 여유는 **단계별**로 잡는다. 하나의 상수로 되돌리면 같은 사고가 되풀이된다.
+//
+// # 🔴 시간 상수들은 서로 물려 있다
+//
+//	leaseDuration(2m)  >  tickBudget(50s)              ← 아래 「lease 와 중복 실행」
+//	tickBudget(50s)    <  Cloud Run(60s) - tailReserve(3s)
+//	tickBudget(50s)    >= llmCallNeed(45s)             ← 빈 tick 에 LLM 한 번은 들어가야 한다
+//	llmCallNeed(45s)   =  LLM 실측 최악(33.6s) + 여유 + saveReserve(5s)
+//	CALL_AI_TIMEOUT_SECONDS(50s) > 우리가 거는 최대 창(tickBudget - saveReserve = 45s)
+//
+// 마지막 줄이 중요하다. 공급자 HTTP 클라이언트의 타임아웃이 우리 창보다 **짧으면**
+// 언제나 그쪽이 먼저 끊긴다 — 2026-09-18 에 실제로 그랬다(30초). 우리 창이 먼저 끊겨야
+// 「공급자가 우리가 준 시간 안에 못 끝냈다」를 우리 쪽에서 일관되게 분류할 수 있다.
 //
 // # lease 와 중복 실행
 //
@@ -43,11 +65,34 @@ import (
 const (
 	// tickBudget 은 한 tick 이 쓰는 시간이다. Cloud Run 상한(60초)보다 짧아야 한다.
 	tickBudget = 50 * time.Second
-	// stepReserve 는 「한 단계 더 갈 수 있는가」를 판단하는 최소 여유다.
-	// 공급자 호출 하나(기본 30초 타임아웃)와 상태 저장을 담을 수 있어야 한다.
-	stepReserve = 12 * time.Second
 	// tailReserve 는 응답을 쓰기 위해 남겨 두는 시간이다.
 	tailReserve = 3 * time.Second
+	// saveReserve 는 공급자 호출이 끝난 뒤 **결과를 저장할** 시간이다.
+	// 전사문 shard 쓰기, 분석 저장, 통화 레코드 확정이 여기 들어간다. 이것을 떼지 않고
+	// 남은 시간을 통째로 공급자에게 주면, 비싼 호출이 성공하고도 저장하지 못해 버려진다.
+	saveReserve = 5 * time.Second
+
+	// ── 단계별 최소 예산 ──
+	// 이 값보다 남은 시간이 적으면 그 단계를 **시작하지 않는다**(pipeline.deferStep).
+	// 시작해 놓고 중간에 끊으면 공급자 쪽 계산은 그대로 돌아 요금은 나가고 결과는 못 받는다.
+
+	// asrStartNeed 는 업로드 정책 조회 + **오디오 전체 업로드** + 전사 제출이다.
+	// 오디오 바이트가 통째로 나가는 유일한 단계라 폴링보다 훨씬 크게 잡는다.
+	asrStartNeed = 30 * time.Second
+	// asrPollNeed 는 작업 조회 한 번과, 끝났을 때 전사 결과 문서를 내려받는 시간이다.
+	asrPollNeed = 15 * time.Second
+	// llmCallNeed 는 전사문 하나를 정리하는 시간이다.
+	//
+	// 🔴 **숫자를 지어내지 마라.** 이 값은 실측에서 나왔다 —
+	// internal/callai/live_test.go 의 TestLiveAnalyzeLatency 로 25분 분량(프롬프트 60KB,
+	// 15.6k 토큰) 합성 전사문을 qwen3.7-plus 에 넣어 3회 측정: 28.5s / 29.8s / 33.6s.
+	// 최악 33.6초에 공급자 지연 편차를 얹어 창을 40초로 보고, 저장 여유를 더해 45초다.
+	// 모델·프롬프트·thinking 설정을 바꾸면 **다시 재고 이 값을 고쳐야 한다.**
+	llmCallNeed = 40*time.Second + saveReserve
+
+	// minStepBudget 은 작업에 손이라도 대 볼 수 있는 최소 예산이다. 단계별 실제 필요량은
+	// pipeline 이 다시 보므로, 여기서는 가장 싼 단계(ASR 폴링)조차 못 하는 경우만 거른다.
+	minStepBudget = asrPollNeed
 )
 
 // tokenValidator 는 OIDC 검증기다. 테스트가 갈아 끼울 수 있게 함수 타입으로 뽑았다.
@@ -127,6 +172,20 @@ func (t *tickHandler) serve(w http.ResponseWriter, r *http.Request) {
 func (t *tickHandler) run(ctx context.Context, deadline time.Time) tickResponse {
 	var res tickResponse
 	left := func() time.Duration { return deadline.Sub(t.pipe.clock()) }
+	// total 은 이 tick 이 **시작할 때** 가졌던 예산이다. pipeline 이 「앞 통화가 시간을 써서
+	// 밀린 것」과 「빈 tick 이어도 안 들어가는 단계」를 가르는 데 쓴다(stepBudget 주석 참고).
+	total := left()
+
+	// 🔴 예산을 ctx 에도 건다. 시계 검사(left)는 **단계 사이에서만** 돌기 때문에, 한 번 들어간
+	// 공급자 호출이 예산을 넘겨도 그 자체로는 멈추지 않는다. 그대로 두면 Cloud Run 요청
+	// 상한(60초)에 먼저 걸려 상태를 저장하지 못한 채 잘린다 — 그 통화는 lease 가 만료될
+	// 때까지 멈춰 있는다. 기한을 시각이 아니라 **남은 기간**으로 거는 것은 테스트가 가짜
+	// 시계를 쓰기 때문이다(가짜 시각으로 WithDeadline 을 걸면 이미 지난 기한이 된다).
+	if total > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, total)
+		defer cancel()
+	}
 
 	jobs, err := t.pipe.jobs.Claim(ctx, t.pipe.clock(), t.batch)
 	if err != nil {
@@ -135,7 +194,7 @@ func (t *tickHandler) run(ctx context.Context, deadline time.Time) tickResponse 
 	res.Claimed = len(jobs)
 
 	for _, j := range jobs {
-		if left() < stepReserve {
+		if left() < minStepBudget {
 			// 예산이 모자라 아직 손도 못 댄 작업은 lease 를 바로 풀어 준다.
 			t.release(ctx, j)
 			continue
@@ -145,8 +204,8 @@ func (t *tickHandler) run(ctx context.Context, deadline time.Time) tickResponse 
 		lease := j.NextAttemptAt
 		progressed := false
 	steps:
-		for left() >= stepReserve {
-			r, err := t.pipe.step(ctx, j)
+		for left() >= minStepBudget {
+			r, err := t.pipe.step(ctx, j, stepBudget{left: left(), total: total})
 			if err != nil {
 				// 저장조차 못 했다. lease 가 만료되면 다음 tick 이 다시 집는다.
 				log.Printf("calls: tick 작업 저장 실패 call=%s state=%s: %v", j.CallID, j.State, err)
@@ -158,7 +217,7 @@ func (t *tickHandler) run(ctx context.Context, deadline time.Time) tickResponse 
 			case stepWait:
 				progressed = true
 				// 폴링 간격만큼 기다릴 여유가 없으면 여기서 멈춘다.
-				if left() < pollWait+stepReserve {
+				if left() < pollWait+minStepBudget {
 					break steps
 				}
 				if err := t.pipe.wait(ctx, pollWait); err != nil {
