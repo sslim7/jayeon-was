@@ -125,11 +125,20 @@ func main() {
 	// Bearer 액세스 토큰을 파싱해 사용자 ID 를 주입하는 미들웨어의 발급자.
 	// 401 판정은 미들웨어가 아니라 핸들러 몫이다 — 인증 없이 열리는 경로가 섞여 있다.
 	tokens := auth.NewTokenIssuer(jwtSecret)
-	auth.Register(mux, users.NewStore(client), tokens)
+	// 같은 Store 가 계정(auth.AccountStore)과 기기 세션(auth.SessionStore)을 **둘 다**
+	// 구현한다. 세션 문서가 `users/{uid}/sessions/{id}` 로 계정 문서 아래에 살기 때문이다
+	// (internal/users/sessions.go 의 SessionCollection).
+	//
+	// 🔴 세션 저장소는 **선택 사항이 아니다.** 어드민 시크릿이나 통화분석 설정처럼 "없으면
+	// 그 기능만 끄고 기동" 하는 대상이 아니라는 뜻이다 — 끌 설정 자체가 없고(필요한 것은
+	// 이미 필수인 Firestore 클라이언트뿐), 세션 없이 발급한 토큰은 첫 갱신에서 거절된다
+	// (internal/auth/handler.go 의 login).
+	userStore := users.NewStore(client)
+	auth.Register(mux, userStore, userStore, tokens)
 	users.Register(mux, client)
 
 	// 개인정보 도메인은 현재 계정 상태와 임시 비밀번호 변경 여부도 확인한다.
-	domainGuard := userguard.New(users.NewStore(client))
+	domainGuard := userguard.New(userStore)
 	recipients.Register(mux, client, domainGuard)
 	calls.Register(mux, client, domainGuard, callOptions(ctx))
 	sms.Register(mux, client, domainGuard)

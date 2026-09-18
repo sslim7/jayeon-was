@@ -46,12 +46,39 @@ func (s *fakeAccounts) SetPassword(_ context.Context, _ string, hash string, _ t
 
 func testHandler(t *testing.T) (*Handler, *fakeAccounts) {
 	t.Helper()
+	h, s, _ := testHandlerWithSessions(t)
+	return h, s
+}
+
+// testHandlerWithSessions 는 세션 저장소까지 돌려준다. 세션 쪽을 보는 테스트는
+// 쓰기 횟수를 세야 해서(fakeSessions.touches) 저장소를 직접 들여다봐야 한다.
+func testHandlerWithSessions(t *testing.T) (*Handler, *fakeAccounts, *fakeSessions) {
+	t.Helper()
 	hash, err := credentials.HashPassword("current-password")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := &fakeAccounts{account: Account{UserID: "user-1", Email: "user@example.com", PasswordHash: hash, IsActive: true, MustChangePassword: true}}
-	return &Handler{store: s, tokens: NewTokenIssuer("test-secret"), verifyPassword: credentials.VerifyPassword, now: time.Now}, s
+	sessions := newFakeSessions()
+	return &Handler{store: s, sessions: sessions, tokens: NewTokenIssuer("test-secret"), verifyPassword: credentials.VerifyPassword, now: time.Now}, s, sessions
+}
+
+// newSession 은 토큰 발급에 쓸 세션을 하나 만들고 그 id 를 돌려준다.
+//
+// 🔴 세션 없이 발급한 리프레시 토큰은 **세션 검사에서** 401 이 된다. 그것으로
+// "TokenVersion 이 오르면 옛 토큰이 막힌다" 를 확인하면 **엉뚱한 이유로 통과하는**
+// 테스트가 되어, 버전 대조를 지워도 초록불이 유지된다. 그래서 버전 쪽을 보는 테스트는
+// 반드시 살아 있는 세션을 먼저 만든다.
+func newSession(t *testing.T, sessions *fakeSessions, uid string, ver int) string {
+	t.Helper()
+	now := time.Now()
+	id, err := sessions.CreateSession(context.Background(), uid, Session{
+		DeviceLabel: "테스트", CreatedAt: now, LastSeenAt: now, TokenVersion: ver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func request(t *testing.T, h http.HandlerFunc, body any, id string) *httptest.ResponseRecorder {
@@ -123,9 +150,10 @@ func TestLoginEnumerationAndDisabled(t *testing.T) {
 
 // TestLoginAndRefreshContract 는 앱과 합의된 토큰 계약과 **리프레시 무효화**를 못 박는다.
 //
-//   - 로그인 응답은 mustChangePassword 를 싣고 expiresInSec 은 AccessTokenTTL(3600)이다.
+//   - 로그인 응답은 mustChangePassword 를 싣고 expiresInSec 은 AccessTokenTTL(900)이다.
 //     앱이 이 값으로 재발급 시점을 잡으므로 숫자가 바뀌면 앱이 먼저 깨진다.
-//   - 발급된 리프레시 토큰에 그 시점의 TokenVersion 이 실려 있다.
+//     🔴 이 숫자는 **「기기 끊기」가 듣기까지의 시간**이기도 하다(token.go 의 AccessTokenTTL).
+//   - 발급된 리프레시 토큰에 그 시점의 TokenVersion 과 세션 id 가 실려 있다.
 //   - 리프레시 응답에는 mustChangePassword 가 **없다.** 앱이 리프레시 응답으로 그 상태를
 //     덮어쓰면 비밀번호 변경 화면이 사라지거나 다시 뜬다.
 //   - 매번 새 리프레시 토큰을 준다(회전).
@@ -137,7 +165,7 @@ func TestLoginEnumerationAndDisabled(t *testing.T) {
 //     리프레시로 승격되는 셈이 된다(token.go 의 TokenUse).
 //   - 비활성 계정은 403, 삭제된 계정은 401(세션 만료)이다.
 func TestLoginAndRefreshContract(t *testing.T) {
-	h, s := testHandler(t)
+	h, s, _ := testHandlerWithSessions(t)
 	s.account.TokenVersion = 4
 	w := request(t, h.login, map[string]string{"email": "user@example.com", "password": "current-password"}, "")
 	expectStatus(t, w, 200)
@@ -148,12 +176,12 @@ func TestLoginAndRefreshContract(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.MustChangePassword || body.ExpiresInSec != 3600 || body.AccessToken == "" {
+	if !body.MustChangePassword || body.ExpiresInSec != 900 || body.AccessToken == "" {
 		t.Fatal(w.Body.String())
 	}
-	id, ver, err := h.tokens.ParseRefresh(body.RefreshToken)
-	if err != nil || id != "user-1" || ver != 4 {
-		t.Fatal(id, ver, err)
+	id, ver, sid, err := h.tokens.ParseRefresh(body.RefreshToken)
+	if err != nil || id != "user-1" || ver != 4 || sid == "" {
+		t.Fatal(id, ver, sid, err)
 	}
 	w = request(t, h.refresh, map[string]string{"refreshToken": body.RefreshToken}, "")
 	expectStatus(t, w, 200)
@@ -211,9 +239,12 @@ func TestChangePassword(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h, s := testHandler(t)
-			oldRefresh, _ := h.tokens.IssueRefresh("user-1", 0)
-			access, _ := h.tokens.IssueAccess("user-1")
+			h, s, sessions := testHandlerWithSessions(t)
+			// 🔴 살아 있는 세션으로 발급한다. 세션 없는 토큰은 세션 검사에서 막히므로
+			// 아래의 "옛 리프레시는 401" 이 버전 대조를 지워도 통과하게 된다.
+			sid := newSession(t, sessions, "user-1", 0)
+			oldRefresh, _ := h.tokens.IssueRefresh("user-1", 0, sid)
+			access, _ := h.tokens.IssueAccess("user-1", sid)
 			w := request(t, h.changePassword, map[string]string{"currentPassword": tc.current, "newPassword": tc.new}, tc.id)
 			expectStatus(t, w, tc.status)
 			if tc.status != 204 {
@@ -240,9 +271,10 @@ func TestChangePassword(t *testing.T) {
 // 없다. 세 엔드포인트 모두 500 + INTERNAL_ERROR 로 눕히고 원래 문구("private")는 본문
 // 어디에도 없어야 한다.
 func TestStoreFailuresUseInternalCode(t *testing.T) {
-	h, s := testHandler(t)
+	h, s, sessions := testHandlerWithSessions(t)
+	sid := newSession(t, sessions, "user-1", 0)
 	s.err = errors.New("private database detail")
-	token, _ := h.tokens.IssueRefresh("user-1", 0)
+	token, _ := h.tokens.IssueRefresh("user-1", 0, sid)
 	for _, tc := range []struct {
 		handle http.HandlerFunc
 		body   map[string]string
@@ -266,10 +298,10 @@ func TestStoreFailuresUseInternalCode(t *testing.T) {
 // Register 가 경로를 틀리게 걸거나 미들웨어를 안 거쳐도 전부 통과한다. 여기서만 실제
 // mux 와 Bearer 헤더를 거쳐 들어가므로, 경로 오타나 미들웨어 누락이 이 테스트에서 걸린다.
 func TestRegisteredRoutesWithBearer(t *testing.T) {
-	h, s := testHandler(t)
+	h, s, sessions := testHandlerWithSessions(t)
 	mux := http.NewServeMux()
-	Register(mux, s, h.tokens)
-	access, _ := h.tokens.IssueAccess("user-1")
+	Register(mux, s, sessions, h.tokens)
+	access, _ := h.tokens.IssueAccess("user-1", newSession(t, sessions, "user-1", 0))
 	r := httptest.NewRequest("POST", "/auth/change-password", strings.NewReader(`{"currentPassword":"current-password","newPassword":"next-password"}`))
 	r.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()

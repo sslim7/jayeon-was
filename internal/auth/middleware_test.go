@@ -9,12 +9,12 @@ import (
 func TestMiddleware(t *testing.T) {
 	issuer := NewTokenIssuer("test-secret")
 
-	valid, err := issuer.IssueAccess("user-1")
+	valid, err := issuer.IssueAccess("user-1", "sess-1")
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}
 	// 리프레시 토큰은 Bearer 자리에서 무효여야 한다.
-	refresh, err := issuer.IssueRefresh("user-1", 0)
+	refresh, err := issuer.IssueRefresh("user-1", 0, "sess-1")
 	if err != nil {
 		t.Fatalf("발급 실패: %v", err)
 	}

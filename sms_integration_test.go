@@ -61,7 +61,7 @@ func TestSMSHTTPFiftyRecipientLifecycle(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		token, e := tokens.IssueAccess(id)
+		token, e := tokens.IssueAccess(id, "sess-test")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -252,7 +252,7 @@ func TestSMSHTTPReservedCampaign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := tokens.IssueAccess(id)
+	token, err := tokens.IssueAccess(id, "sess-test")
 	if err != nil {
 		t.Fatal(err)
 	}
