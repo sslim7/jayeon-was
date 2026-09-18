@@ -464,6 +464,16 @@ func (p *pipeline) stepAnalyze(ctx context.Context, j *job, b stepBudget) (stepR
 // 토큰으로 폴링을 이어가 봐야 영원히 끝나지 않는다. 다만 무한 재업로드를 막기 위해
 // asrAttempt 상한은 그대로 적용한다.
 func (p *pipeline) requeueASR(ctx context.Context, j *job, code string) (stepResult, error) {
+	// 🔴 **GCS 에 원본이 없는 통화는 다시 받아쓸 수 없다.** 여기 오는 통화는 둘이다:
+	// ① 기기에서 받아쓰기까지 끝내고 결과만 올린 옛 통화를 레코드에서 되살린 작업
+	//    (§audio.go jobFromRecord — 애초에 오디오가 GCS 에 없다)
+	// ② 보관 기간(366일)이 지나 원본이 삭제된 통화.
+	// 그대로 QUEUED 로 돌려보내도 stepStart 가 같은 사실을 발견하고 멈추기는 한다. 그러나
+	// 그 사이 한 tick 동안 상태가 「업로드 완료, 순서 기다리는 중」으로 **되돌아가** 사용자
+	// 화면에는 진행 중인 것처럼 보이고, ASR 시도 횟수를 한 번 쓴다. 여기서 끊는다.
+	if j.Audio.Object == "" {
+		return p.failTerminal(ctx, j, phaseASR, "AUDIO_MISSING", callai.KindInputUnavailable.String(), nil, 0)
+	}
 	if j.ASRAttempt >= maxASRAttempts {
 		return p.failTerminal(ctx, j, phaseASR, code, callai.KindInputUnavailable.String(), nil, 0)
 	}
