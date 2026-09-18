@@ -36,7 +36,7 @@ Excel의 첫 행은 열 제목이며 두 번째 행부터 데이터를 읽는다
 
 ## 문자보내기 전체 발송이력
 
-`GET /sms/history?q=수신자이름&limit=50&cursor=...` → `{items: RecipientHistory[],nextCursor:string|null,total:number}`. q는 발송 당시 snapshot 이름의 대소문자 무시 부분검색이며 최대 100자다. limit은 1~100, 기본 50이다. 기존 수신자별 이력과 동일한 row shape(`campaignTitle`, 항상 배열인 `attachments` 포함)를 반환한다.
+`GET /sms/history?q=이름또는번호뒷자리&limit=50&cursor=...` → `{items: RecipientHistory[],nextCursor:string|null,total:number}`. q는 발송 당시 snapshot 의 **이름 부분검색(대소문자 무시) 또는 전화번호 부분검색(뒷자리 포함)** 이며 최대 100자다. 하이픈·공백·괄호·`+82` 표기 차이는 양쪽 모두 걷어 내고 숫자만 비교하고, 글자와 숫자가 섞이면 글자는 이름·숫자는 번호를 가리킨다(`김영 7649`). 규칙은 앱 `src/lib/recipient-search.ts` 및 `GET /calls?q=` 와 같으며 서버는 `internal/recipients/search.go` 한 곳에 둔다. limit은 1~100, 기본 50이다. 기존 수신자별 이력과 동일한 row shape(`campaignTitle`, 항상 배열인 `attachments` 포함)를 반환한다.
 
 순서는 `sentAt`, 없으면 `failedAt`, 둘 다 없으면 `updatedAt`의 내림차순이며 같은 시각에는 고유 이력 ID 내림차순이다. 완료된 SENT/FAILED 시도와 현재 SENDING 시도를 포함하고, 아직 시도하지 않은 READY는 제외한다. 실패 후 재시도 준비로 READY가 되어도 이전 실패 시도는 남는다. 수신자를 수정·삭제해도 과거 스냅샷으로 조회한다. cursor는 사용자와 q에 귀속되므로 검색어 변경 시 초기화한다.
 

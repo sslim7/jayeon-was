@@ -150,7 +150,9 @@ func (s *FirestoreStore) History(ctx context.Context, uid, q string, limit int, 
 	}
 	all := []recipients.History{}
 	for _, h := range merged {
-		if q == "" || strings.Contains(strings.ToLower(h.Name), q) {
+		// 이름만 보던 자리다. 앱의 검색칸이 「이름 또는 폰번호 뒷4자리」로 통일된 뒤로는
+		// 숫자를 쳐도 한 건도 안 나왔다. 규칙은 recipients.MatchesQuery 한 곳에만 둔다.
+		if recipients.MatchesQuery(q, h.Name, h.Phone) {
 			all = append(all, h)
 		}
 	}
