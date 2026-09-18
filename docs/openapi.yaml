@@ -28,27 +28,42 @@ paths:
     get:
       tags: [calls]
       operationId: listCallAnalyses
-      summary: 기기에서 분석한 통화 목록
+      summary: 이름 또는 전화번호 뒷자리로 검색하는 통화 목록
       description: >-
-        사용자 소유 완료 통화만 통화일시(recorded_at) 내림차순, 같은 시각이면 통화 ID 내림차순으로 반환한다.
-        페이지 크기는 서버가 정한 30건 고정이다. nextCursor 가 있으면 다음 페이지가 있고, 없으면 마지막 페이지다.
+        사용자 소유 통화만 통화일시(recorded_at) 내림차순, 같은 시각이면 통화 ID 내림차순으로 반환한다.
         목록 항목에는 transcript 와 analysis 가 없고 160자 한 줄 요약만 들어 있다.
-        이름 검색은 서버가 하지 않는다 — 클라이언트가 받아 온 목록에서 직접 거른다.
+
+
+        `q` 는 **이름 부분일치(대소문자 무시) 또는 전화번호 부분일치(뒷자리 포함)** 다.
+        하이픈·공백·괄호·`+82` 표기 차이는 양쪽 모두 걷어 내고 숫자만 비교한다.
+        글자와 숫자가 섞이면 글자는 이름, 숫자는 번호를 가리킨다(`김영 7649`).
+        규칙은 앱의 `src/lib/recipient-search.ts` 와 같고 서버는 `internal/recipients/search.go` 한 곳에 둔다.
+
+
+        🔴 **검색 중에는 items 가 limit 보다 적어도 마지막 페이지가 아니다.**
+        Firestore 는 부분 문자열 검색을 인덱스로 못 하므로 서버가 최신순으로 문서를 읽어 메모리에서 거르고,
+        한 요청이 훑는 문서 수에 상한(300건)을 둔다. 상한에 걸리면 **찾은 만큼만 돌려주고 nextCursor 를 남긴다**.
+        따라서 클라이언트는 `nextCursor` 가 사라질 때까지(또는 화면이 찰 때까지) 이어 불러야 한다.
+        `nextCursor` 가 없을 때만 마지막 페이지다.
+
+
+        커서는 **검색어에 귀속된다.** `q` 를 바꾸면서 이전 커서를 그대로 보내면 400 이다(커서를 버리고 처음부터 다시 부른다).
       parameters:
+        - {in: query, name: q, description: '이름 또는 전화번호 뒷자리. 없거나 비어 있으면 전체.', schema: {type: string, maxLength: 100}}
+        - {in: query, name: limit, description: '페이지 크기. 서버가 1~100 으로 제한한다.', schema: {type: integer, minimum: 1, maximum: 100, default: 30}}
         - {in: query, name: cursor, description: 이전 응답의 nextCursor 를 그대로 보낸다, schema: {type: string, maxLength: 2048}}
-        - {in: query, name: limit, deprecated: true, description: '서버가 무시한다. 페이지 크기는 항상 30이다.', schema: {type: integer}}
       responses:
         '200':
-          description: 통화 목록 (페이지당 최대 30건)
+          description: 통화 목록 (페이지당 최대 limit 건)
           content:
             application/json:
               schema:
                 type: object
                 required: [items]
                 properties:
-                  items: {type: array, maxItems: 30, items: {$ref: '#/components/schemas/CallSummary'}}
-                  nextCursor: {type: string, description: 없으면 마지막 페이지}
-        '400': {description: 커서 형식 오류}
+                  items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/CallSummary'}}
+                  nextCursor: {type: string, description: '없으면 마지막 페이지. 검색 중에는 items 가 limit 보다 적어도 남을 수 있다(스캔 상한).'}
+        '400': {description: '커서·limit·검색어 형식 오류'}
         '401': {description: 인증 필요}
         '403': {description: 비활성 또는 비밀번호 변경 필요 계정}
   /calls/{id}:
@@ -92,6 +107,108 @@ paths:
         '401': {description: 인증 필요}
         '409': {description: 동일 ID 에 다른 결과 존재}
         '413': {description: '요청 본문 또는 저장 바이트가 한도를 넘음(CALL_TOO_LARGE). 재시도해도 소용없다'}
+  /calls/{id}/audio/upload-url:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,128}$'}}
+    post:
+      tags: [calls]
+      operationId: createCallAudioUploadURL
+      summary: 녹음 파일 업로드용 서명 URL 발급
+      description: >-
+        서버 통화분석 경로의 첫 단계다. 작업 문서를 AWAITING_UPLOAD 로 만들고 GCS V4 서명 PUT URL 을 돌려준다.
+        **서버는 오디오 바이트를 통과시키지 않는다** — 앱이 이 URL 로 GCS 에 직접 올린다.
+
+
+        🔴 **PUT 할 때 응답의 headers["Content-Type"] 을 글자 그대로 똑같이 보내야 한다.**
+        Content-Type 이 서명에 들어가므로 다르면 GCS 가 403 SignatureDoesNotMatch 를 돌려주는데
+        응답만 봐서는 원인이 전혀 드러나지 않는다.
+
+
+        객체 경로는 결정적이다(`calls/{uid}/{callId}/audio{ext}`). complete 전이라면 몇 번이든 다시 불러도
+        같은 경로에 새 URL 이 발급된다 — 재시도마다 고아 객체가 생기지 않게 하기 위해서다.
+        진행률과 취소는 단순 PUT 으로 가능하다(XMLHttpRequest.upload.onprogress / xhr.abort).
+        resumable 업로드는 지원하지 않는다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CallAudioUploadRequest'}
+      responses:
+        '200':
+          description: 서명 URL
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CallAudioUploadURL'}
+        '400': {description: 형식/크기/연락처 검증 실패}
+        '401': {description: 인증 필요}
+        '404': {description: 다른 사용자의 통화 ID (존재 사실을 알려주지 않는다)}
+        '409': {description: '이미 분석이 시작된 통화(CALL_ALREADY_QUEUED). 오디오를 갈아 끼우면 전사문과 원본이 어긋난다'}
+        '500': {description: '서명 실패. 운영에서는 대개 iam.serviceAccounts.signBlob 권한 문제이며 원인은 서버 로그에만 남는다'}
+  /calls/{id}/audio/complete:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,128}$'}}
+    post:
+      tags: [calls]
+      operationId: completeCallAudioUpload
+      summary: 업로드 완료 통보 및 분석 큐잉
+      description: >-
+        GCS 객체의 존재와 크기를 확인하고 작업을 QUEUED 로 바꾼다.
+        이때 **플레이스홀더 통화 레코드가 생겨** 이후 진행 상태가 기존 GET /calls, GET /calls/{id} 로 그대로 보인다.
+        본문은 없거나 빈 객체다. 이미 큐잉된 통화에 다시 불러도 200 과 현재 상태를 돌려준다(앱 재시도 대비).
+      responses:
+        '200':
+          description: 현재 작업 상태(요약 레코드)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CallSummary'}
+        '400': {description: '업로드가 끝나지 않았거나 크기가 비정상(CALL_AUDIO_MISSING)'}
+        '401': {description: 인증 필요}
+        '404': {description: 본인 소유 작업 없음}
+        '409': {description: 'upload-url 을 먼저 받지 않았다(CALL_NO_AUDIO)'}
+  /calls/{id}/reanalyze:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,128}$'}}
+    post:
+      tags: [calls]
+      operationId: reanalyzeCall
+      summary: 전사문을 그대로 두고 분석만 다시 실행
+      description: >-
+        **오디오를 다시 전사하지 않는다** — ASR 이 가장 비싼 단계이고 재분석이 필요한 이유는 대개 프롬프트 변경이나 LLM 실패다.
+        따라서 보관 기간(366일)이 지나 원본 오디오가 사라진 뒤에도 동작한다.
+        작업이 COMPLETED / ANALYSIS_FAILED / TRANSCRIBED 이고 전사문이 있어야 한다. 본문은 없다.
+      responses:
+        '200':
+          description: 재분석 예약됨(요약 레코드)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CallSummary'}
+        '401': {description: 인증 필요}
+        '404': {description: 본인 소유 작업 없음}
+        '409': {description: '분석 가능한 상태가 아니거나(CALL_NOT_ANALYZABLE) 다시 분석할 원문이 없다(CALL_NO_TRANSCRIPT)'}
+  /internal/calls/tick:
+    post:
+      tags: [calls]
+      operationId: runCallPipelineTick
+      summary: 통화분석 파이프라인 구동 (Cloud Scheduler 전용)
+      description: >-
+        🔴 **앱이 부르는 API 가 아니다.** Cloud Scheduler 가 1분마다 OIDC 토큰으로 호출한다.
+        Cloud Run 이 allow_unauthenticated 라 **이 핸들러가 유일한 방어선**이며, 검증 항목은 네 개다:
+        ①구글 서명 ②aud 일치(Cloud Run 서비스 URL, 경로 없음) ③email 이 CALL_TICK_CALLER 와 일치 ④email_verified == true.
+        실패 이유는 응답에 적지 않는다.
+
+
+        한 요청이 50초 예산 안에서 작업을 여러 단계 전진시키고, 못 끝낸 것은 상태로 저장해 다음 tick 에 넘긴다.
+        **응답 후 도는 백그라운드 작업은 없다**(Cloud Run cpu_idle=true 라 응답 직후 CPU 가 스로틀된다).
+        응답에는 개수와 남은 예산만 들어가며 통화 내용은 한 글자도 담기지 않는다.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 이번 tick 결과
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CallTickResult'}
+        '401': {description: 허용되지 않은 호출자}
   /recipients/{id}/external-sends:
     post:
       tags: [recipients]
@@ -136,11 +253,16 @@ paths:
     get:
       tags: [messaging]
       operationId: listSmsHistory
-      summary: 수신자 이름으로 검색하는 전체 발송이력
-      description: SENT·FAILED 완료 시도와 현재 SENDING 시도. 발송시각 내림차순 후 고유 ID 내림차순. READY 제외. 사용자 및 검색어에 귀속된 커서.
+      summary: 수신자 이름 또는 전화번호 뒷자리로 검색하는 전체 발송이력
+      description: >-
+        SENT·FAILED 완료 시도와 현재 SENDING 시도. 발송시각 내림차순 후 고유 ID 내림차순. READY 제외.
+        사용자 및 검색어에 귀속된 커서.
+        `q` 는 GET /calls 와 **같은 규칙**이다 — 이름 부분일치(대소문자 무시) 또는 전화번호 부분일치(뒷자리 포함),
+        하이픈·공백·괄호·`+82` 표기 차이는 숫자만 남겨 비교한다.
       parameters:
         - in: query
           name: q
+          description: '이름 또는 전화번호 뒷자리. 없거나 비어 있으면 전체.'
           schema: {type: string, maxLength: 100}
         - in: query
           name: limit
@@ -1335,7 +1457,8 @@ components:
       properties:
         model: {type: string, minLength: 1, maxLength: 200}
         model_version: {type: string, minLength: 1, maxLength: 200}
-        processed_on_device: {type: boolean, enum: [true]}
+        processed_on_device: {type: boolean, description: '기기 업로드 경로는 true(CallInput 에서는 필수). 서버 파이프라인이 만든 레코드는 false 다'}
+        provider: {type: string, maxLength: 200, description: '**응답 전용.** 서버 파이프라인이 쓴 공급자 이름. 요청에 넣으면 400'}
     CallAnalysis:
       type: object
       description: 저장되는 JSON 합계 최대 400000 bytes. 배열은 비어도 생략하지 않는다.
@@ -1379,6 +1502,11 @@ components:
       description: >-
         PUT /calls/{id} 요청 본문. 명세에 없는 필드는 거부한다(서버가 unknown field 를 400 으로 막는다).
         status/progress/error/summary 는 받아도 서버가 덮어쓴다 — status 는 COMPLETED, 나머지는 비운다.
+
+
+        🔴 **이 스키마는 동결이다.** 서버 파이프라인이 응답에 붙이는 필드
+        (job_state, stage, has_audio, audio_url, ai.provider)를 **요청에 넣으면 400 이다** —
+        구버전 앱 계약을 넓히지 않기 위해 서버가 명시적으로 거부한다. 응답에서 읽기만 하라.
       required: [call_id, contact, call, created_at, transcript, analysis, ai]
       additionalProperties: false
       properties:
@@ -1393,34 +1521,107 @@ components:
         transcript: {$ref: '#/components/schemas/CallTranscript'}
         analysis: {$ref: '#/components/schemas/CallAnalysis'}
         ai: {$ref: '#/components/schemas/CallAI'}
+    CallStatus:
+      type: string
+      description: >-
+        🔴 **닫힌 집합이다.** 앱이 이 값으로 진행 단계를 계산하므로 서버는 여기 없는 값을 내보내지 않는다.
+        서버 파이프라인의 내부 상태는 job_state 로 따로 나가며, status 는 아래처럼 사상된다:
+        AWAITING_UPLOAD→PENDING, QUEUED→PREPARING, ASR_RUNNING/ASR_POLLING→TRANSCRIBING,
+        TRANSCRIBED/ANALYZING→ANALYZING, COMPLETED→COMPLETED, TRANSCRIPTION_FAILED→TRANSCRIPTION_FAILED,
+        ANALYSIS_FAILED→ANALYSIS_FAILED.
+        기기 업로드 경로(PUT)로 저장된 레코드는 항상 COMPLETED 다.
+        UPLOADING/UPLOAD_FAILED/UPLOAD_REJECTED/PENDING/FAILED 는 기기 경로 전용 값이다.
+      enum: [PENDING, PREPARING, TRANSCRIBING, ANALYZING, UPLOADING, COMPLETED, FAILED, TRANSCRIPTION_FAILED, ANALYSIS_FAILED, UPLOAD_FAILED, UPLOAD_REJECTED]
+    CallJobState:
+      type: string
+      description: '**응답 전용.** 서버 파이프라인 내부 상태 원문. 기기 경로 레코드에는 붙지 않는다.'
+      enum: [AWAITING_UPLOAD, QUEUED, ASR_RUNNING, ASR_POLLING, TRANSCRIBED, ANALYZING, COMPLETED, TRANSCRIPTION_FAILED, ANALYSIS_FAILED]
     CallSummary:
       type: object
-      description: 목록 항목과 PUT 응답. transcript/analysis 를 담지 않는다.
+      description: >-
+        목록 항목과 PUT/audio/reanalyze 응답. transcript/analysis 를 담지 않는다.
+        🔴 audio_url 은 여기 **없다** — 30건마다 서명 URL 30개를 만드는 것은 불필요한 비용이고
+        목록 화면은 재생 버튼을 쓰지 않는다. 목록에서는 has_audio 만 본다.
       required: [call_id, contact, call, created_at, status, progress]
       properties:
         call_id: {type: string}
         contact: {$ref: '#/components/schemas/CallContact'}
         call: {$ref: '#/components/schemas/CallMeta'}
         created_at: {type: string, format: date-time}
-        status: {type: string, enum: [COMPLETED]}
-        progress: {type: number, nullable: true}
+        status: {$ref: '#/components/schemas/CallStatus'}
+        progress: {type: number, nullable: true, minimum: 0, maximum: 1}
         summary: {type: string, description: analysis.summary 를 공백 정규화한 160자 한 줄 요약}
-        error: {type: string, nullable: true}
+        error: {type: string, nullable: true, description: 실패 코드(공급자 코드 또는 분류 이름)}
+        job_state: {$ref: '#/components/schemas/CallJobState'}
+        stage: {type: string, maxLength: 60, description: '**응답 전용.** 사용자에게 그대로 보여 줄 한국어 단계명(예: 받아쓰는 중)'}
+        has_audio: {type: boolean, description: '**응답 전용.** GCS 에 원본 오디오가 있는지. false 는 실패가 아니다(기기 경로 통화이거나 보관 기간이 지난 통화)'}
+        ai: {$ref: '#/components/schemas/CallAI'}
     CallDetail:
       type: object
       description: GET /calls/{id} 응답. 원문과 구조화 할 일까지 모두 담는다.
-      required: [call_id, contact, call, created_at, status, progress, transcript, analysis, ai]
+      required: [call_id, contact, call, created_at, status, progress]
       properties:
         call_id: {type: string}
         contact: {$ref: '#/components/schemas/CallContact'}
         call: {$ref: '#/components/schemas/CallMeta'}
         created_at: {type: string, format: date-time}
-        status: {type: string, enum: [COMPLETED]}
-        progress: {type: number, nullable: true}
+        status: {$ref: '#/components/schemas/CallStatus'}
+        progress: {type: number, nullable: true, minimum: 0, maximum: 1}
         error: {type: string, nullable: true}
-        transcript: {$ref: '#/components/schemas/CallTranscript'}
-        analysis: {$ref: '#/components/schemas/CallAnalysis'}
+        job_state: {$ref: '#/components/schemas/CallJobState'}
+        stage: {type: string, maxLength: 60, description: '**응답 전용.** 한국어 단계명'}
+        has_audio: {type: boolean, description: '**응답 전용.** GCS 에 원본 오디오가 있는지'}
+        audio_url:
+          type: string
+          nullable: true
+          description: >-
+            **응답 전용, 상세에만 붙는다.** 녹음 재생용 V4 서명 GET URL 이며 **15분 뒤 만료된다.**
+            🔴 저장되지 않고 조회할 때마다 새로 발급된다 — 만료되는 값을 저장하면 굳은 URL 이 남는다.
+            값이 없는 경우는 둘 다 정상이다: ①기기 업로드 경로로 저장된 통화 ②보관 기간(366일)이 지나 원본이 삭제된 통화.
+            🔴 **보관 만료는 분석 실패가 아니다** — status 는 COMPLETED 그대로이고 audio_url 만 없다.
+        transcript:
+          allOf: [{$ref: '#/components/schemas/CallTranscript'}]
+          nullable: true
+          description: 아직 전사가 끝나지 않은 통화에서는 없다(오류가 아니다)
+        analysis:
+          allOf: [{$ref: '#/components/schemas/CallAnalysis'}]
+          nullable: true
+          description: 아직 분석이 끝나지 않은 통화에서는 없다(오류가 아니다)
         ai: {$ref: '#/components/schemas/CallAI'}
+    CallAudioUploadRequest:
+      type: object
+      required: [content_type, size, contact, call]
+      properties:
+        content_type:
+          type: string
+          description: 🔴 이 값을 PUT 의 Content-Type 헤더로 **글자 그대로** 다시 보내야 서명이 맞는다
+          enum: [audio/m4a, audio/mp4, audio/aac, audio/mpeg, audio/wav, audio/x-wav, audio/ogg, audio/webm, audio/amr, audio/3gpp]
+        size: {type: integer, minimum: 1, maximum: 104857600, description: 예상 바이트 수(최대 100 MiB)}
+        contact: {$ref: '#/components/schemas/CallContact'}
+        call: {$ref: '#/components/schemas/CallMeta'}
+    CallAudioUploadURL:
+      type: object
+      required: [call_id, method, url, headers, object, expires_at, max_bytes]
+      properties:
+        call_id: {type: string}
+        method: {type: string, enum: [PUT]}
+        url: {type: string, format: uri, description: GCS V4 서명 URL}
+        headers:
+          type: object
+          description: 🔴 **PUT 요청에 이 헤더를 그대로 실어야 한다.** 다르면 GCS 가 403 SignatureDoesNotMatch 를 돌려준다
+          additionalProperties: {type: string}
+        object: {type: string, description: '결정적 객체 경로(calls/{uid}/{callId}/audio{ext}). 재시도는 같은 경로를 덮어쓴다'}
+        expires_at: {type: string, format: date-time, description: 서명 만료(발급 시각 +60분)}
+        max_bytes: {type: integer, description: 업로드 상한}
+        retention_days: {type: integer, description: '원본 오디오 보관 일수. 삭제는 GCS 수명주기 정책이 한다'}
+    CallTickResult:
+      type: object
+      required: [claimed, advanced, failed, remaining_budget_ms]
+      properties:
+        claimed: {type: integer, description: 이번 tick 이 lease 를 건 작업 수}
+        advanced: {type: integer, description: 한 단계 이상 전진한 작업 수}
+        failed: {type: integer, description: 이번 tick 에서 확정 실패한 작업 수}
+        remaining_budget_ms: {type: integer, description: 남은 예산(ms)}
     ExternalSendResult:
       type: object
       required: [recipient, history]

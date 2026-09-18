@@ -68,6 +68,24 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 	if e != nil || filtered.Total != 2 || len(filtered.Items) != 2 || filtered.Items[0].CampaignTitle != c.Title || filtered.Items[0].Message != "스냅샷 본문" {
 		t.Fatal(filtered, e)
 	}
+	// 앱의 검색칸이 「이름 또는 폰번호 뒷4자리」라 숫자도 걸려야 한다. 예전에는 이름만 봤다.
+	for _, tc := range []struct {
+		why  string
+		q    string
+		want int
+	}{
+		{"전화번호 뒷4자리", "5678", 1},
+		{"하이픈 표기", "1111-2222", 1},
+		{"+82 표기", "+82 10-1234-5678", 1},
+		{"글자+숫자는 둘 다 맞아야 한다", "길동 5678", 1},
+		{"글자가 다르면 번호가 맞아도 불일치", "영희 5678", 0},
+		{"일치 없음", "9999", 0},
+	} {
+		got, e := s.History(ctx, uid, tc.q, 50, "")
+		if e != nil || got.Total != tc.want {
+			t.Fatalf("%s: q=%q → %d건 (%v)", tc.why, tc.q, got.Total, e)
+		}
+	}
 	other, e := s.History(ctx, uid+"-other", "", 50, "")
 	if e != nil || len(other.Items) != 0 {
 		t.Fatal(other, e)

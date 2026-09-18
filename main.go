@@ -10,14 +10,17 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"cloud.google.com/go/storage"
 	"github.com/joho/godotenv"
 	"github.com/sslim7/nature-was/internal/admin"
 	"github.com/sslim7/nature-was/internal/auth"
+	"github.com/sslim7/nature-was/internal/callai"
 	"github.com/sslim7/nature-was/internal/calls"
 	"github.com/sslim7/nature-was/internal/messaging"
 	"github.com/sslim7/nature-was/internal/recipients"
@@ -128,7 +131,7 @@ func main() {
 	// 개인정보 도메인은 현재 계정 상태와 임시 비밀번호 변경 여부도 확인한다.
 	domainGuard := userguard.New(users.NewStore(client))
 	recipients.Register(mux, client, domainGuard)
-	calls.Register(mux, client, domainGuard)
+	calls.Register(mux, client, domainGuard, callOptions(ctx))
 	sms.Register(mux, client, domainGuard)
 	messaging.Register(mux, client, domainGuard)
 
@@ -172,6 +175,58 @@ func main() {
 		log.Printf("graceful shutdown 실패: %v", err)
 	}
 	log.Println("서버 종료")
+}
+
+// callOptions 는 서버 통화분석 파이프라인의 배선을 환경변수에서 읽는다.
+//
+// 🔴 **여기서 log.Fatal 하지 않는다.** AI 설정이나 버킷 이름 하나가 없다고 SMS·로그인까지
+// 죽을 이유가 없다 — 모자라면 오디오·tick 라우트만 꺼지고(calls.Register 가 판단한다)
+// 기존 기기 업로드 경로는 그대로 돈다. 어드민 API 관례(internal/admin.Register)와 같다.
+func callOptions(ctx context.Context) calls.Options {
+	bucket := os.Getenv("CALL_AUDIO_BUCKET")
+	if bucket == "" {
+		return calls.Options{}
+	}
+	// 🔴 버킷 존재 확인을 하지 않는다. 런타임 서비스 계정에 storage.buckets.get 이 없다.
+	sc, err := storage.NewClient(ctx)
+	if err != nil {
+		log.Printf("calls: Storage 클라이언트 생성 실패 — 서버 통화분석을 켜지 않는다: %v", err)
+		return calls.Options{}
+	}
+	cfg := callai.FromEnv()
+	transcriber, analyzer, err := callai.New(cfg)
+	if err != nil {
+		log.Printf("calls: AI 공급자 초기화 실패 — 서버 통화분석을 켜지 않는다: %v", err)
+		return calls.Options{}
+	}
+	return calls.Options{
+		Storage:       sc,
+		Bucket:        bucket,
+		RetentionDays: envInt("CALL_AUDIO_RETENTION_DAYS", 366),
+		Transcriber:   transcriber,
+		Analyzer:      analyzer,
+		ASRProvider:   cfg.ASRProvider,
+		LLMProvider:   cfg.LLMProvider,
+		Language:      envOr("CALL_ASR_LANGUAGE", "ko"),
+		TickAudience:  os.Getenv("CALL_TICK_AUDIENCE"),
+		TickCaller:    os.Getenv("CALL_TICK_CALLER"),
+		TickToken:     os.Getenv("CALL_TICK_TOKEN"),
+		TickBatch:     envInt("CALL_TICK_BATCH", 5),
+	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v > 0 {
+		return v
+	}
+	return def
 }
 
 // corsPolicy 는 정확 일치 오리진 집합과 사설망 와일드카드 패턴을 담는다.

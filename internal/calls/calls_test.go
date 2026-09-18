@@ -61,6 +61,8 @@ func TestValidation(t *testing.T) {
 type fakeRepo struct {
 	uid   string
 	calls int
+	q     string
+	limit int
 }
 
 func (s *fakeRepo) Save(_ context.Context, uid string, p *payload) (Record, error) {
@@ -73,8 +75,9 @@ func (s *fakeRepo) Get(_ context.Context, uid, id string) (Record, error) {
 	s.calls++
 	return fixture(), nil
 }
-func (s *fakeRepo) List(_ context.Context, uid, cursor string) (Page, error) {
+func (s *fakeRepo) List(_ context.Context, uid, q string, limit int, cursor string) (Page, error) {
 	s.uid = uid
+	s.q, s.limit = q, limit
 	s.calls++
 	return Page{Items: []Record{}}, nil
 }
@@ -224,7 +227,7 @@ func TestFirestoreIsolationIdempotencyAndShards(t *testing.T) {
 	if _, e = s.Get(ctx, uid+"-other", "call-1"); status.Code(e) != codes.NotFound {
 		t.Fatalf("owner isolation: %v", e)
 	}
-	page, e := s.List(ctx, uid, "")
+	page, e := s.List(ctx, uid, "", defaultPageSize, "")
 	if e != nil || len(page.Items) != 1 || page.Items[0].Transcript != nil || page.NextCursor != "" {
 		t.Fatalf("list: %v", e)
 	}
@@ -272,7 +275,7 @@ func TestFirestoreMalformedDocuments(t *testing.T) {
 	}); e != nil {
 		t.Fatal(e)
 	}
-	page, e := s.List(ctx, uid, "")
+	page, e := s.List(ctx, uid, "", defaultPageSize, "")
 	if e != nil {
 		t.Fatalf("손상 문서 하나가 목록 전체를 막는다: %v", e)
 	}
@@ -296,7 +299,7 @@ func TestFirestorePaging(t *testing.T) {
 	uid := fmtID() + "-paging"
 	calls := client.Collection("users").Doc(uid).Collection("calls")
 	base := time.Now().Add(-time.Hour)
-	for i := 0; i < pageSize+1; i++ {
+	for i := 0; i < defaultPageSize+1; i++ {
 		r := fixture()
 		r.CallID = fmt.Sprintf("call-%03d", i)
 		if e = validate(&r, r.CallID); e != nil {
@@ -309,17 +312,178 @@ func TestFirestorePaging(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	first, e := s.List(ctx, uid, "")
-	if e != nil || len(first.Items) != pageSize || first.NextCursor == "" {
+	first, e := s.List(ctx, uid, "", defaultPageSize, "")
+	if e != nil || len(first.Items) != defaultPageSize || first.NextCursor == "" {
 		t.Fatalf("첫 페이지: %v, %d건, cursor=%q", e, len(first.Items), first.NextCursor)
 	}
-	second, e := s.List(ctx, uid, first.NextCursor)
+	second, e := s.List(ctx, uid, "", defaultPageSize, first.NextCursor)
 	if e != nil || len(second.Items) != 1 || second.NextCursor != "" {
 		t.Fatalf("마지막 페이지: %v, %d건, cursor=%q", e, len(second.Items), second.NextCursor)
 	}
-	if _, e = s.List(ctx, uid, "not-a-cursor"); !errors.Is(e, ErrCursor) {
+	if _, e = s.List(ctx, uid, "", defaultPageSize, "not-a-cursor"); !errors.Is(e, ErrCursor) {
 		t.Fatalf("잘못된 커서: %v", e)
 	}
 }
 
 func fmtID() string { return "test-" + time.Now().Format("20060102150405.000000000") }
+
+// limit 과 검색어는 Firestore 를 만지기 **전에** 걸러야 한다. 잘못된 값으로 쿼리를 날리면
+// 읽기 비용만 쓰고 500 이 난다. 그래서 클라이언트 없이도(nil) 검증만 확인할 수 있다.
+func TestListParameterValidation(t *testing.T) {
+	s := &Store{nil}
+	ctx := context.Background()
+	for _, c := range []struct {
+		why    string
+		q      string
+		limit  int
+		cursor string
+	}{
+		{"limit 0", "", 0, ""},
+		{"limit 음수", "", -1, ""},
+		{"limit 상한 초과", "", maxPageSize + 1, ""},
+		{"검색어 길이 초과", strings.Repeat("가", maxQueryRunes+1), defaultPageSize, ""},
+		{"커서 길이 초과", "", defaultPageSize, strings.Repeat("x", 2049)},
+		{"커서 형식 오류", "", defaultPageSize, "not-a-cursor"},
+	} {
+		if _, e := s.List(ctx, "owner", c.q, c.limit, c.cursor); !errors.Is(e, ErrCursor) {
+			t.Errorf("%s: %v", c.why, e)
+		}
+	}
+}
+
+// 핸들러가 limit 과 q 를 그대로 넘기는지. 앱이 한 화면을 30+30 두 번에 나눠 부르던 것을
+// 고치는 변경이라, limit 이 조용히 무시되면 고친 것이 아무 효과가 없다.
+func TestListQueryParameters(t *testing.T) {
+	store := &fakeRepo{}
+	mux := http.NewServeMux()
+	register(mux, store, func(h http.Handler) http.Handler { return h })
+	get := func(url string) int {
+		req := httptest.NewRequest("GET", url, nil)
+		req = req.WithContext(auth.WithUserID(req.Context(), "owner-a"))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w.Code
+	}
+	if get("/calls") != 200 || store.limit != defaultPageSize || store.q != "" {
+		t.Fatalf("기본값: limit=%d q=%q", store.limit, store.q)
+	}
+	if get("/calls?limit=50&q=%EA%B9%80%202222") != 200 || store.limit != 50 || store.q != "김 2222" {
+		t.Fatalf("limit/q 전달: limit=%d q=%q", store.limit, store.q)
+	}
+	if code := get("/calls?limit=abc"); code != 400 {
+		t.Fatalf("숫자가 아닌 limit: %d", code)
+	}
+	// 범위(1~100) 검증은 Store.List 한 곳에서 한다 — TestListParameterValidation 참고.
+}
+
+// 서버 검색. 이름 부분일치·전화번호 뒷자리·표기 차이·스캔 상한·커서 귀속까지 한 번에 본다.
+func TestFirestoreSearch(t *testing.T) {
+	if os.Getenv("FIRESTORE_EMULATOR_HOST") == "" {
+		t.Skip("Firestore emulator required")
+	}
+	ctx := context.Background()
+	client, e := firestore.NewClient(ctx, "nature-call-tests")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer client.Close()
+	s := &Store{client}
+	uid := fmtID() + "-search"
+	calls := client.Collection("users").Doc(uid).Collection("calls")
+	base := time.Now().Add(-time.Hour)
+	// recordedAt 오름차순으로 넣으므로 목록(최신순)에서는 뒤집혀 나온다.
+	people := []Contact{
+		{Name: "김고객", Phone: "01011112222"},
+		{Name: "이영희", Phone: "01033334444"},
+		{Name: "박철수", Phone: "+821055556666"}, // 구버전 저장 형식
+		{Name: "김영수", Phone: "01077778888"},
+		{Name: "Lee", Phone: "01099990000"},
+	}
+	for i, c := range people {
+		r := fixture()
+		r.CallID = fmt.Sprintf("call-%03d", i)
+		r.Contact = c
+		if e = validate(&r, r.CallID); e != nil {
+			t.Fatal(e)
+		}
+		meta, _ := marshalCompact(listRecord(r))
+		if _, e = calls.Doc(r.CallID).Set(ctx, map[string]any{
+			"record": meta, "digest": r.CallID, "recordedAt": base.Add(time.Duration(i) * time.Minute), "transcriptShards": int64(0), "todoCount": int64(0),
+		}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	names := func(p Page) []string {
+		out := []string{}
+		for _, r := range p.Items {
+			out = append(out, r.Contact.Name)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		why  string
+		q    string
+		want string
+	}{
+		{"빈 검색어는 전체", "", "Lee,김영수,박철수,이영희,김고객"},
+		{"이름 부분일치", "김", "김영수,김고객"},
+		{"이름 대소문자 무시", "lee", "Lee"},
+		{"전화번호 뒷4자리", "2222", "김고객"},
+		{"하이픈 표기", "7777-8888", "김영수"},
+		{"저장된 +82 번호도 뒷자리로 걸린다", "6666", "박철수"},
+		{"검색어의 +82 표기", "+82 10-9999-0000", "Lee"},
+		{"글자+숫자는 둘 다 맞아야 한다", "김 8888", "김영수"},
+		{"일치 없음", "없는사람", ""},
+	} {
+		p, e := s.List(ctx, uid, c.q, defaultPageSize, "")
+		if e != nil {
+			t.Fatalf("%s: %v", c.why, e)
+		}
+		if got := strings.Join(names(p), ","); got != c.want {
+			t.Errorf("%s: q=%q → %q, want %q", c.why, c.q, got, c.want)
+		}
+		if p.NextCursor != "" {
+			t.Errorf("%s: 마지막 페이지인데 커서가 남았다", c.why)
+		}
+	}
+
+	// limit 경계. 1 과 maxPageSize 는 통과해야 한다.
+	if p, e := s.List(ctx, uid, "", 1, ""); e != nil || len(p.Items) != 1 || p.NextCursor == "" {
+		t.Fatalf("limit=1: %v, %d건, cursor=%q", e, len(p.Items), p.NextCursor)
+	}
+	if p, e := s.List(ctx, uid, "", maxPageSize, ""); e != nil || len(p.Items) != len(people) || p.NextCursor != "" {
+		t.Fatalf("limit=%d: %v, %d건", maxPageSize, e, len(p.Items))
+	}
+
+	// 검색 결과의 페이징. limit 이 차면 커서가 남고, 이어 받으면 나머지가 온다.
+	first, e := s.List(ctx, uid, "김", 1, "")
+	if e != nil || len(first.Items) != 1 || first.Items[0].Contact.Name != "김영수" || first.NextCursor == "" {
+		t.Fatalf("검색 첫 페이지: %v, %v, cursor=%q", e, names(first), first.NextCursor)
+	}
+	second, e := s.List(ctx, uid, "김", 1, first.NextCursor)
+	if e != nil || len(second.Items) != 1 || second.Items[0].Contact.Name != "김고객" || second.NextCursor != "" {
+		t.Fatalf("검색 마지막 페이지: %v, %v, cursor=%q", e, names(second), second.NextCursor)
+	}
+	// 커서는 검색어에 귀속된다. 다른 검색어로 이어 읽으면 앞부분이 통째로 빠진 목록이 나온다.
+	if _, e = s.List(ctx, uid, "이", 1, first.NextCursor); !errors.Is(e, ErrCursor) {
+		t.Fatalf("검색어가 바뀐 커서: %v", e)
+	}
+	if _, e = s.List(ctx, uid, "", 1, first.NextCursor); !errors.Is(e, ErrCursor) {
+		t.Fatalf("검색 커서를 검색 없는 조회에 쓰면: %v", e)
+	}
+
+	// 스캔 상한. 자리가 남아도 상한에 걸리면 찾은 만큼만 주고 커서를 남긴다 —
+	// 그래야 앱이 "여기까지만 찾았다" 를 알고 이어 받는다.
+	page, e := s.list(ctx, uid, "김", 10, "", 2)
+	if e != nil || len(page.Items) != 1 || page.Items[0].Contact.Name != "김영수" || page.NextCursor == "" {
+		t.Fatalf("상한 1회차: %v, %v, cursor=%q", e, names(page), page.NextCursor)
+	}
+	page, e = s.list(ctx, uid, "김", 10, page.NextCursor, 2)
+	if e != nil || len(page.Items) != 0 || page.NextCursor == "" {
+		t.Fatalf("상한 2회차(한 건도 못 찾았지만 계속 있다): %v, %v, cursor=%q", e, names(page), page.NextCursor)
+	}
+	page, e = s.list(ctx, uid, "김", 10, page.NextCursor, 2)
+	if e != nil || len(page.Items) != 1 || page.Items[0].Contact.Name != "김고객" || page.NextCursor != "" {
+		t.Fatalf("상한 3회차(끝): %v, %v, cursor=%q", e, names(page), page.NextCursor)
+	}
+}

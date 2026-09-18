@@ -94,12 +94,30 @@ type AI struct {
 	Model             string `json:"model"`
 	ModelVersion      string `json:"model_version"`
 	ProcessedOnDevice bool   `json:"processed_on_device"`
+	// Provider 는 서버 파이프라인이 쓴 공급자 이름이다(기기 경로는 빈 값). 응답 전용이다.
+	Provider string `json:"provider,omitempty"`
 }
+
+// Record 는 목록·상세 응답이자 PUT 요청 본문이다.
+//
+// 🔴 **PUT /calls/{id} 의 요청 스키마는 동결이다.** 구버전 앱이 쓰고 있고 핸들러가
+// DisallowUnknownFields 라, **우리가 응답에 붙인 필드를 앱이 그대로 되돌려 보내는 순간
+// 400** 이 된다. 그래서 서버 파이프라인이 채우는 새 필드(JobState/Stage/HasAudio,
+// AI.Provider)는
+//
+//	① 반드시 `omitempty` 로 둬서 기기 경로 응답에는 아예 나타나지 않게 하고,
+//	② 기기 경로 검증 validate() 가 **요청에 들어오면 invalid 로 거부**한다.
+//
+// 이러면 디코딩은 통과하되 계약은 지켜지고(400 은 그대로 나간다), 응답에는 필드가 붙어
+// 앱이 읽을 수 있다. 요청 전용 타입을 따로 두는 방법도 있었지만 그러면 응답용 타입과
+// 두 벌이 되어 **필드 하나가 어긋나도 컴파일이 되는 상태**가 만들어진다 — 조용히 어긋나는
+// 쪽이 더 위험해서 한 타입으로 뒀다.
 type Record struct {
-	CallID     string      `json:"call_id"`
-	Contact    Contact     `json:"contact"`
-	Call       Metadata    `json:"call"`
-	CreatedAt  string      `json:"created_at"`
+	CallID    string   `json:"call_id"`
+	Contact   Contact  `json:"contact"`
+	Call      Metadata `json:"call"`
+	CreatedAt string   `json:"created_at"`
+	// Status 는 **앱 어휘**다. 내부 작업 상태를 그대로 내보내면 앱이 깨진다(appStatus 주석 참고).
 	Status     string      `json:"status"`
 	Progress   *float64    `json:"progress"`
 	Transcript *Transcript `json:"transcript,omitempty"`
@@ -107,6 +125,68 @@ type Record struct {
 	AI         *AI         `json:"ai,omitempty"`
 	Summary    string      `json:"summary,omitempty"`
 	Error      *string     `json:"error,omitempty"`
+	// JobState 는 서버 파이프라인의 내부 상태 원문이다(응답 전용).
+	JobState string `json:"job_state,omitempty"`
+	// Stage 는 사용자에게 그대로 보여 줄 한국어 단계명이다(응답 전용).
+	Stage string `json:"stage,omitempty"`
+	// HasAudio 는 GCS 에 원본 오디오가 아직 있는지다(응답 전용).
+	//
+	// 🔴 false 라고 실패가 아니다. 버킷 수명주기가 366일 뒤 원본을 지우지만 전사문·분석은
+	// Firestore 에 영구히 남는다. 완료된 옛 통화는 정상적으로 has_audio=false 가 된다.
+	HasAudio bool `json:"has_audio,omitempty"`
+	// AudioURL 은 녹음을 들을 수 있는 **짧게 만료되는 서명 GET URL** 이다(응답 전용).
+	//
+	// 🔴 **저장하지 않는다.** 만료되는 값이라 Firestore 에 넣으면 굳은 URL 이 남아, 나중에
+	// 그 값을 읽은 앱이 403 만 받는다. GET /calls/{id} 를 처리할 때마다 새로 발급한다.
+	// 🔴 **목록(GET /calls)에는 넣지 않는다.** 한 페이지(최대 100건)마다 그만큼 서명을 만드는 것은 목록 조회에
+	// 불필요한 비용이고(서명마다 IAM signBlob 왕복이 날 수 있다) 목록 화면은 재생 버튼을
+	// 쓰지 않는다. 목록에는 has_audio 만 준다.
+	// 값이 없는 경우는 둘 다 **정상**이다: ① 기기 업로드 경로로 저장된 통화(GCS 에 원본이 없다)
+	// ② 보관 기간이 지나 원본이 삭제된 통화. 앱은 값이 없으면 재생 버튼을 잠근다.
+	AudioURL *string `json:"audio_url,omitempty"`
+}
+
+// appStatus 는 내부 작업 상태(callJobs.state)를 앱이 아는 status 어휘로 사상한다.
+//
+// 🔴 **앱의 STAGE_INDEX 는 닫힌 집합이다**(jayeon-app `src/lib/call-progress.ts`).
+// 모르는 값이 들어오면 `STAGE_INDEX[status]` 가 undefined 가 되어 진행률과 단계 표시가
+// 통째로 깨진다. 응답 필드를 **추가**하는 것은 안전하지만 기존 필드의 **값 집합을 넓히는
+// 것은 안전하지 않다.** 그래서 내부 상태는 job_state 로 따로 내보내고 status 는 사상한다.
+//
+//	AWAITING_UPLOAD            → PENDING
+//	QUEUED                     → PREPARING
+//	ASR_RUNNING / ASR_POLLING  → TRANSCRIBING
+//	TRANSCRIBED / ANALYZING    → ANALYZING
+//	COMPLETED                  → COMPLETED
+//	TRANSCRIPTION_FAILED       → TRANSCRIPTION_FAILED
+//	ANALYSIS_FAILED            → ANALYSIS_FAILED
+//
+// UPLOADING/UPLOAD_* 는 기기 경로 전용이라 서버는 쓰지 않는다.
+func appStatus(state string) string {
+	switch state {
+	case stateAwaitingUpload:
+		return "PENDING"
+	case stateQueued:
+		return "PREPARING"
+	case stateASRRunning, stateASRPolling:
+		return "TRANSCRIBING"
+	case stateTranscribed, stateAnalyzing:
+		return "ANALYZING"
+	case stateCompleted:
+		return "COMPLETED"
+	case stateTranscriptionFailed:
+		return "TRANSCRIPTION_FAILED"
+	case stateAnalysisFailed:
+		return "ANALYSIS_FAILED"
+	}
+	// 모르는 상태를 앱에 흘리느니 진행 중으로 보여 준다. 앱이 undefined 로 깨지는 것보다 낫다.
+	return "PREPARING"
+}
+
+// appStatuses 는 서버가 내보낼 수 있는 status 값 전부다. 서버 경로 검증이 이 집합만 통과시킨다.
+var appStatuses = map[string]bool{
+	"PENDING": true, "PREPARING": true, "TRANSCRIBING": true, "ANALYZING": true,
+	"COMPLETED": true, "TRANSCRIPTION_FAILED": true, "ANALYSIS_FAILED": true,
 }
 
 var invalid = errors.New("invalid call")
@@ -143,7 +223,13 @@ func marshalCompact(v any) ([]byte, error) {
 	b := buf.Bytes()
 	return b[:len(b)-1], nil // Encode 가 붙이는 개행 하나를 뗀다
 }
-func validate(r *Record, id string) error {
+
+// validateCommon 은 기기 경로와 서버 경로가 함께 쓰는 검사다.
+//
+// 🔴 transcript/analysis 는 **있을 때만** 검사한다. 서버 파이프라인은 전사·분석이 끝나기
+// 전에 진행 상태를 보여 줄 플레이스홀더 레코드를 저장해야 해서 둘 다 nil 인 시점이 있다.
+// 「둘 다 반드시 있어야 한다」는 것은 기기 업로드 규약이지 저장 구조의 제약이 아니다.
+func validateCommon(r *Record, id string) error {
 	if !recipients.ValidateID(id) || r.CallID != id || !validRunes(r.Contact.Name, maxNameRunes, true) || !phonePattern.MatchString(r.Contact.Phone) || !validText(r.Call.FileName, 1024, true) {
 		return invalid
 	}
@@ -165,20 +251,25 @@ func validate(r *Record, id string) error {
 	if r.Call.Duration != nil && (math.IsNaN(*r.Call.Duration) || math.IsInf(*r.Call.Duration, 0) || *r.Call.Duration < 0 || *r.Call.Duration > 86400) {
 		return invalid
 	}
-	if r.Transcript == nil || r.Analysis == nil || r.AI == nil || !r.AI.ProcessedOnDevice || !validText(r.AI.Model, 200, true) || !validText(r.AI.ModelVersion, 200, true) {
+	if r.AI != nil && (!validText(r.AI.Model, 200, true) || !validText(r.AI.ModelVersion, 200, true) || !validText(r.AI.Provider, 200, false)) {
 		return invalid
 	}
-	if !validText(r.Transcript.Text, maxTranscriptTextBytes, true) || r.Transcript.Segments == nil || len(r.Transcript.Segments) > 20000 {
-		return invalid
-	}
-	last := float64(0)
-	for _, s := range r.Transcript.Segments {
-		if s.Start < last || s.End < s.Start || s.End > 86400 || !validText(s.Text, 64000, true) || !validText(s.Speaker, 100, false) {
+	if t := r.Transcript; t != nil {
+		if !validText(t.Text, maxTranscriptTextBytes, true) || t.Segments == nil || len(t.Segments) > 20000 {
 			return invalid
 		}
-		last = s.Start
+		last := float64(0)
+		for _, s := range t.Segments {
+			if s.Start < last || s.End < s.Start || s.End > 86400 || !validText(s.Text, 64000, true) || !validText(s.Speaker, 100, false) {
+				return invalid
+			}
+			last = s.Start
+		}
 	}
 	a := r.Analysis
+	if a == nil {
+		return nil
+	}
 	if a.SchemaVersion != 1 || !validText(a.Summary, 32000, true) || a.Details == nil || len(a.Details) > 200 || a.Todos == nil || len(a.Todos) > 100 || a.Decisions == nil {
 		return invalid
 	}
@@ -207,13 +298,62 @@ func validate(r *Record, id string) error {
 			}
 		}
 	}
+	return nil
+}
+
+// validate 는 **기기 업로드 규약**이다. 여기서만 ai.processed_on_device 를 요구하고
+// status 를 COMPLETED 로 못박는다 — 기기는 다 끝난 결과만 올리기 때문이다.
+// 서버 파이프라인은 validateServer 를 쓴다.
+func validate(r *Record, id string) error {
+	// 🔴 응답 전용 필드가 **요청**에 들어오면 거부한다. Record 주석 참고 —
+	// 이것이 PUT 요청 스키마 동결을 지키는 장치다.
+	if r.JobState != "" || r.Stage != "" || r.HasAudio || r.AudioURL != nil || (r.AI != nil && r.AI.Provider != "") {
+		return invalid
+	}
+	if r.Transcript == nil || r.Analysis == nil || r.AI == nil || !r.AI.ProcessedOnDevice {
+		return invalid
+	}
+	if err := validateCommon(r, id); err != nil {
+		return err
+	}
 	r.Status = "COMPLETED"
 	r.Progress = nil
 	r.Error = nil
 	r.Summary = ""
+	r.JobState = ""
+	r.Stage = ""
+	return nil
+}
+
+// validateServer 는 서버 파이프라인이 만든 레코드를 검사한다.
+//
+// 기기 경로와 다른 점은 셋뿐이다: transcript/analysis 가 nil 이어도 되고,
+// ai.processed_on_device 는 false 여야 하며, status/progress/error 를 덮어쓰지 않는다
+// (진행 상태를 그대로 보여 주는 것이 이 경로의 목적이다).
+func validateServer(r *Record, id string) error {
+	if r.AI != nil && (r.AI.ProcessedOnDevice || !validText(r.AI.Provider, 200, true)) {
+		return invalid
+	}
+	if !appStatuses[r.Status] || !validRunes(r.Stage, 60, false) || !validText(r.JobState, 40, false) {
+		return invalid
+	}
+	if p := r.Progress; p != nil && (math.IsNaN(*p) || math.IsInf(*p, 0) || *p < 0 || *p > 1) {
+		return invalid
+	}
+	if r.Error != nil && !validText(*r.Error, 200, true) {
+		return invalid
+	}
+	if err := validateCommon(r, id); err != nil {
+		return err
+	}
+	// summary 는 listRecord 가 분석에서 다시 만든다. 호출부가 넣은 값은 버린다.
+	r.Summary = ""
 	return nil
 }
 func listRecord(r Record) Record {
+	// 🔴 서명 URL 은 만료되는 값이라 **저장 바이트에 절대 들어가면 안 된다.** payload 로
+	// 가는 유일한 길목이 여기이므로 여기서 비운다.
+	r.AudioURL = nil
 	r.Transcript = nil
 	if r.Analysis != nil {
 		r.Summary = strings.Join(strings.Fields(r.Analysis.Summary), " ")
@@ -244,12 +384,25 @@ type payload struct {
 	shards     int
 }
 
-// prepare 는 검증 → 직렬화 → 저장 한도 검사 → digest 를 한 번에 끝낸다.
+// prepare 는 **기기 경로**의 검증 → 직렬화 → 저장 한도 검사 → digest 를 한 번에 끝낸다.
 // 한도를 넘는 요청은 Firestore 에 닿기 전에 errTooLarge 로 잘라 낸다(500 이 아니라 413).
 func prepare(r *Record, id string) (*payload, error) {
 	if err := validate(r, id); err != nil {
 		return nil, err
 	}
+	return buildPayload(r)
+}
+
+// prepareServer 는 서버 파이프라인이 만든 레코드를 같은 저장 바이트로 바꾼다.
+// 검증만 다르고 직렬화·digest·한도 로직은 buildPayload 하나를 공유한다.
+func prepareServer(r *Record, id string) (*payload, error) {
+	if err := validateServer(r, id); err != nil {
+		return nil, err
+	}
+	return buildPayload(r)
+}
+
+func buildPayload(r *Record) (*payload, error) {
 	recorded, err := time.Parse(time.RFC3339Nano, r.Call.RecordedAt)
 	if err != nil {
 		return nil, invalid
@@ -258,35 +411,42 @@ func prepare(r *Record, id string) (*payload, error) {
 	if p.meta, err = marshalCompact(p.summary); err != nil {
 		return nil, invalid
 	}
-	if p.transcript, err = marshalCompact(r.Transcript); err != nil {
-		return nil, invalid
-	}
-	// 디코딩된 원문은 여기서 버린다. JSON 버퍼와 동시에 들고 있을 이유가 없다.
-	r.Transcript = nil
-	if len(p.transcript) > maxTranscriptStoreBytes {
-		return nil, errTooLarge
-	}
-	p.shards = (len(p.transcript) + shardBytes - 1) / shardBytes
-	if p.shards > maxShards {
-		return nil, errTooLarge
-	}
-	analysisCopy := *r.Analysis
-	analysisCopy.Todos = []Todo{}
-	if p.analysis, err = marshalCompact(analysisCopy); err != nil {
-		return nil, invalid
-	}
-	analysisTotal := len(p.analysis)
-	for _, t := range r.Analysis.Todos {
-		b, e := marshalCompact(t)
-		if e != nil {
+	// transcript/analysis 가 nil 인 것은 서버 파이프라인의 정상 상태다(아직 안 끝난 통화).
+	// 그때는 shard 0 개, analysis 문서 없음으로 저장된다.
+	if r.Transcript != nil {
+		if p.transcript, err = marshalCompact(r.Transcript); err != nil {
 			return nil, invalid
 		}
-		analysisTotal += len(b)
-		p.todos = append(p.todos, b)
+		// 디코딩된 원문은 여기서 버린다. JSON 버퍼와 동시에 들고 있을 이유가 없다.
+		r.Transcript = nil
+		if len(p.transcript) > maxTranscriptStoreBytes {
+			return nil, errTooLarge
+		}
+		p.shards = (len(p.transcript) + shardBytes - 1) / shardBytes
+		if p.shards > maxShards {
+			return nil, errTooLarge
+		}
 	}
-	r.Analysis = nil
-	if analysisTotal > maxAnalysisStoreBytes {
-		return nil, errTooLarge
+	analysisTotal := 0
+	if r.Analysis != nil {
+		analysisCopy := *r.Analysis
+		analysisCopy.Todos = []Todo{}
+		if p.analysis, err = marshalCompact(analysisCopy); err != nil {
+			return nil, invalid
+		}
+		analysisTotal = len(p.analysis)
+		for _, t := range r.Analysis.Todos {
+			b, e := marshalCompact(t)
+			if e != nil {
+				return nil, invalid
+			}
+			analysisTotal += len(b)
+			p.todos = append(p.todos, b)
+		}
+		r.Analysis = nil
+		if analysisTotal > maxAnalysisStoreBytes {
+			return nil, errTooLarge
+		}
 	}
 	// 문서 수와 총 바이트 모두 Commit 한도 아래여야 한다. 둘 중 하나만 봐도 500 이 난다.
 	if 2+p.shards+len(p.todos) > maxTransactionWrites {

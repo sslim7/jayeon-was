@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "details", "todos", "decisions", "consulting"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "통화의 목적과 결론을 3~5문장으로 요약한 한국어 문장. 요약할 내용이 없으면 빈 문자열."
+    },
+    "details": {
+      "type": "array",
+      "description": "통화에서 다룬 주제별 상세 내용. 주제가 없으면 빈 배열.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "content"],
+        "properties": {
+          "title": { "type": "string", "description": "주제를 나타내는 한국어 소제목 한 줄." },
+          "content": { "type": "string", "description": "그 주제에서 오간 내용. 녹취록에 있는 사실만 쓴다." }
+        }
+      }
+    },
+    "todos": {
+      "type": "array",
+      "description": "통화가 끝난 뒤 실제로 해야 할 일. 없으면 빈 배열.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["content", "owner", "due_date", "source"],
+        "properties": {
+          "content": { "type": "string", "description": "해야 할 일 한 줄. 한국어." },
+          "owner": {
+            "type": ["string", "null"],
+            "description": "녹취록에 명시된 담당자 이름. 언급이 없으면 null. 추측하지 마라."
+          },
+          "due_date": {
+            "type": ["string", "null"],
+            "description": "기한. 반드시 YYYY-MM-DD 형식이어야 한다. 연도가 언급되지 않았거나 날짜를 확정할 수 없으면 null."
+          },
+          "source": { "type": "string", "description": "이 할 일의 근거가 된 녹취록 문장을 그대로 인용한 것." }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "description": "통화에서 합의되거나 확정된 사항. 논의만 하고 끝난 것은 넣지 않는다. 없으면 빈 배열.",
+      "items": { "type": "string" }
+    },
+    "consulting": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "상담 관점 분류. 각 배열은 해당 내용이 없으면 빈 배열.",
+      "required": ["customer_needs", "questions", "concerns", "objections", "important_points", "followups"],
+      "properties": {
+        "customer_needs": {
+          "type": "array",
+          "description": "고객이 원한다고 말한 것.",
+          "items": { "type": "string" }
+        },
+        "questions": {
+          "type": "array",
+          "description": "고객이 물어본 것.",
+          "items": { "type": "string" }
+        },
+        "concerns": {
+          "type": "array",
+          "description": "고객이 걱정된다고 말한 것.",
+          "items": { "type": "string" }
+        },
+        "objections": {
+          "type": "array",
+          "description": "고객이 거절하거나 반대한 것.",
+          "items": { "type": "string" }
+        },
+        "important_points": {
+          "type": "array",
+          "description": "다음 통화 전에 알고 있어야 할 사실. 금액, 수량, 조건, 이름, 일정 등.",
+          "items": { "type": "string" }
+        },
+        "followups": {
+          "type": "array",
+          "description": "우리 쪽에서 다시 연락하거나 확인하기로 한 것.",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
