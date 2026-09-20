@@ -152,19 +152,87 @@ paths:
       operationId: completeCallAudioUpload
       summary: 업로드 완료 통보 및 분석 큐잉
       description: >-
-        GCS 객체의 존재와 크기를 확인하고 작업을 QUEUED 로 바꾼다.
+        GCS 객체의 존재와 크기를 확인하고 작업을 큐에 넣는다.
         이때 **플레이스홀더 통화 레코드가 생겨** 이후 진행 상태가 기존 GET /calls, GET /calls/{id} 로 그대로 보인다.
-        본문은 없거나 빈 객체다. 이미 큐잉된 통화에 다시 불러도 200 과 현재 상태를 돌려준다(앱 재시도 대비).
+        이미 큐잉된 통화에 다시 불러도 200 과 현재 상태를 돌려준다(앱 재시도 대비).
+
+
+        🔴 **본문은 선택이다. 없거나 빈 객체인 요청은 지금까지와 한 글자도 다르게 동작하지 않는다**
+        — 구버전 앱과 웹이 바디 없이 부르고 있고, 사용자가 로컬 받아쓰기를 끄면 서버 받아쓰기로
+        그대로 돌아가는 것이 이 기능의 안전망이다.
+
+
+        `asr: "client"` 를 보내면 **서버가 받아쓰지 않는다.** 작업은 job_state=ASR_RUNNING,
+        stage=「기기에서 받아쓰는 중」으로 서서 폰이 `POST /calls/{id}/transcript` 로 전사문을
+        올릴 때까지 기다린다(그동안 tick 은 이 작업을 집지 않는다).
+        오디오 원본은 두 경우 모두 그대로 GCS 에 올라간다 — 재생 기능이 그것을 쓴다.
+
+
+        ⚠️ `asr` 값이 `server`/`client` 가 아니면 400 이다. 모르는 값을 서버 받아쓰기로 눙치면
+        앱의 오타가 **요금이 나가는 쪽으로 조용히 흐른다.**
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CallAudioCompleteRequest'}
       responses:
         '200':
           description: 현재 작업 상태(요약 레코드)
           content:
             application/json:
               schema: {$ref: '#/components/schemas/CallSummary'}
-        '400': {description: '업로드가 끝나지 않았거나 크기가 비정상(CALL_AUDIO_MISSING)'}
+        '400': {description: '업로드가 끝나지 않았거나 크기가 비정상(CALL_AUDIO_MISSING), 또는 asr 값이 잘못됨'}
         '401': {description: 인증 필요}
         '404': {description: 본인 소유 작업 없음}
         '409': {description: 'upload-url 을 먼저 받지 않았다(CALL_NO_AUDIO)'}
+  /calls/{id}/transcript:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,128}$'}}
+    post:
+      tags: [calls]
+      operationId: putCallClientTranscript
+      summary: 기기에서 받아쓴 전사문 전달 (로컬 받아쓰기 경로)
+      description: >-
+        폰이 whisper 로 받아쓴 전사문을 서버에 넘겨 **분석 단계부터** 이어가게 한다.
+        `POST /calls/{id}/audio/complete` 를 `{"asr":"client"}` 로 부른 통화에서만 쓴다.
+
+
+        🔴 **분석 파이프라인은 서버 받아쓰기와 같은 것을 쓴다.** 전사문을 저장하고 job_state 를
+        TRANSCRIBED 로 놓으면 그 뒤는 tick 이 이어받는다(reanalyze 와 같은 지점이다).
+        응답은 `POST /calls/{id}/reanalyze` 와 같은 요약 레코드이며 status 는 ANALYZING 이다.
+
+
+        🔴 **받아쓰기 원가는 0원이다.** 서버가 ASR 공급자를 한 번도 부르지 않았으므로
+        상세 응답의 `cost.transcription` 과 `cost.usage.audio_seconds` 가 0 으로 나간다.
+        분석(LLM) 비용은 서버 경로와 똑같이 든다.
+
+
+        ⚠️ **같은 요청을 두 번 보내도 안전하다.** 이미 전사문을 받은 작업(TRANSCRIBED/ANALYZING/
+        ANALYSIS_FAILED)에 다시 보내면 원문을 갈아 끼우지 않고 현재 상태를 200 으로 돌려준다 —
+        앱이 응답을 못 받고 재시도하는 경우가 실제로 있다.
+        기기 받아쓰기가 6시간 안에 돌아오지 않아 정리된 통화(TRANSCRIPTION_FAILED /
+        CLIENT_TRANSCRIPT_TIMEOUT)에는 늦게라도 받아 준다 — 거절하면 원문이 요청 본문에 있는데도
+        그 통화는 원문도 분석도 없이 실패로만 남는다.
+
+
+        본문은 CallTranscript 이며 최대 6 MiB, 검증 규칙은 `PUT /calls/{id}` 의 transcript 와 같다.
+        모르는 필드는 무시한다. `segments` 를 생략하면 빈 배열로 본다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CallTranscript'}
+      responses:
+        '200':
+          description: 분석 예약됨(요약 레코드). 중복 요청도 여기로 온다
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CallSummary'}
+        '400': {description: '원문이 비었거나(CALL_EMPTY_TRANSCRIPT) 형식 검증 실패(VALIDATION_FAILED)'}
+        '401': {description: 인증 필요}
+        '404': {description: '본인 소유 작업 없음(남의 통화 ID 도 404 다 — 존재 사실을 알려주지 않는다)'}
+        '409': {description: '서버가 받아쓰는 통화다(CALL_NOT_CLIENT_ASR) 또는 이미 분석이 끝났다(CALL_ALREADY_COMPLETED — 다시 분석하려면 reanalyze 를 쓴다)'}
+        '413': {description: '전사문이 저장 한도를 넘음(CALL_TOO_LARGE). 재시도해도 소용없다'}
   /calls/{id}/reanalyze:
     parameters:
       - {in: path, name: id, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,128}$'}}
@@ -1634,6 +1702,8 @@ components:
           description: >-
             받아쓰기(ASR) 비용(원). 🔴 **정수 원으로 반올림되어 있지 않다** — 짧은 통화는 1원이 안 될 수
             있고, 서버가 0 으로 뭉개면 앱은 「0원」밖에 그릴 수 없어 공짜로 읽힌다. 0.0001원 단위까지 내려간다.
+            ⚠️ **기기에서 받아쓴 통화(asr=client)는 정확히 0 이다** — 서버가 공급자를 한 번도 부르지
+            않았으므로 실제로 0원이다(analysis 는 그대로 든다). 이때만 「0원」이 「모름」이 아니다.
         analysis:
           type: number
           minimum: 0
@@ -1700,7 +1770,10 @@ components:
       enum: [PENDING, PREPARING, TRANSCRIBING, ANALYZING, UPLOADING, COMPLETED, FAILED, TRANSCRIPTION_FAILED, ANALYSIS_FAILED, UPLOAD_FAILED, UPLOAD_REJECTED]
     CallJobState:
       type: string
-      description: '**응답 전용.** 서버 파이프라인 내부 상태 원문. 기기 경로 레코드에는 붙지 않는다.'
+      description: >-
+        **응답 전용.** 서버 파이프라인 내부 상태 원문. 기기 경로(PUT /calls/{id}) 레코드에는 붙지 않는다.
+        ⚠️ ASR_RUNNING 은 두 가지 뜻이다: 서버가 공급자에게 전사를 맡긴 경우와,
+        `asr:"client"` 로 **폰이 직접 받아쓰는 중**인 경우다. 둘은 stage 문구로 구분된다.
       enum: [AWAITING_UPLOAD, QUEUED, ASR_RUNNING, ASR_POLLING, TRANSCRIBED, ANALYZING, COMPLETED, TRANSCRIPTION_FAILED, ANALYSIS_FAILED]
     CallSummary:
       type: object
@@ -1719,7 +1792,7 @@ components:
         summary: {type: string, description: analysis.summary 를 공백 정규화한 160자 한 줄 요약}
         error: {type: string, nullable: true, description: 실패 코드(공급자 코드 또는 분류 이름)}
         job_state: {$ref: '#/components/schemas/CallJobState'}
-        stage: {type: string, maxLength: 60, description: '**응답 전용.** 사용자에게 그대로 보여 줄 한국어 단계명(예: 받아쓰는 중)'}
+        stage: {type: string, maxLength: 60, description: '**응답 전용.** 사용자에게 그대로 보여 줄 한국어 단계명(예: 받아쓰는 중). 기기가 받아쓰는 통화(asr=client)에서는 「기기에서 받아쓰는 중」이다'}
         has_audio: {type: boolean, description: '**응답 전용.** GCS 에 원본 오디오가 있는지. false 는 실패가 아니다(기기 경로 통화이거나 보관 기간이 지난 통화)'}
         ai: {$ref: '#/components/schemas/CallAI'}
     CallDetail:
@@ -1766,6 +1839,23 @@ components:
         size: {type: integer, minimum: 1, maximum: 104857600, description: 예상 바이트 수(최대 100 MiB)}
         contact: {$ref: '#/components/schemas/CallContact'}
         call: {$ref: '#/components/schemas/CallMeta'}
+    CallAudioCompleteRequest:
+      type: object
+      description: >-
+        `POST /calls/{id}/audio/complete` 의 **선택** 본문이다.
+        🔴 본문을 아예 보내지 않는 요청이 정상이며(구버전 앱·웹), 그때는 asr="server" 와 같다.
+      properties:
+        asr:
+          type: string
+          enum: [server, client]
+          default: server
+          description: >-
+            받아쓰기를 누가 하는가. `server` 는 지금까지의 동작(서버가 공급자로 전사한 뒤 분석한다).
+            `client` 는 폰이 받아쓰고 서버는 `POST /calls/{id}/transcript` 를 기다린다
+            (job_state=ASR_RUNNING, stage=「기기에서 받아쓰는 중」).
+            🔴 `client` 인 통화가 **6시간** 안에 전사문을 올리지 않으면 tick 이
+            TRANSCRIPTION_FAILED + `CLIENT_TRANSCRIPT_TIMEOUT` 으로 정리한다 —
+            안 그러면 폰이 돌아오지 않은 통화가 영원히 「받아쓰는 중」으로 남는다.
     CallAudioUploadURL:
       type: object
       required: [call_id, method, url, headers, object, expires_at, max_bytes]

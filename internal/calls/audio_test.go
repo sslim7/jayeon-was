@@ -21,6 +21,9 @@ func TestAudioOwnerIsolation(t *testing.T) {
 		{"POST", "/calls/call-1/audio/upload-url", uploadBody},
 		{"POST", "/calls/call-1/audio/complete", ""},
 		{"POST", "/calls/call-1/reanalyze", ""},
+		// 🔴 기기 전사문 밀어넣기도 남의 통화에는 404 다. 여기서 409(「기기 받아쓰기 작업이
+		// 아니다」)가 나가면 그 ID 가 존재한다는 사실을 알려 주는 것과 같다.
+		{"POST", "/calls/call-1/transcript", clientTranscriptBody},
 		{"GET", "/calls/call-1", ""},
 	} {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {

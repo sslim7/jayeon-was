@@ -65,7 +65,28 @@ const (
 	// 그래서 이 상한에 걸렸다는 것은 곧 「예산 상수가 현실과 맞지 않는다」는 뜻이고,
 	// 다섯 번(≈5분)이면 로그로 알아보기에 충분하다.
 	maxDefers = 5
+	// clientTranscriptTimeout 은 **기기 받아쓰기를 기다려 주는 시간**이다.
+	//
+	// 🔴 폰이 받아쓰다 말고 영영 안 돌아오는 경우가 반드시 생긴다(앱 삭제, 기기 분실,
+	// 사용자 포기, 배터리). 그 통화는 ASR_RUNNING 인데 서버는 아무것도 하지 않으므로
+	// **영원히 「기기에서 받아쓰는 중」으로 남는다** — 실패보다 알아채기 어려운 고장이다.
+	// 그래서 이 시간이 지나면 tick 이 TRANSCRIPTION_FAILED 로 정리한다(§pipeline.stepClientWait).
+	//
+	// 6시간인 이유: 아이폰 15 Pro 실측으로 28분 통화가 7분 18초다. 기기가 몇 시간 잠겨
+	// 있거나 앱이 백그라운드에서 밀려 늦게 끝내는 것은 정상이고, 하루를 기다리면 사용자는
+	// 그 사이 화면이 멈춘 줄 알고 다시 녹음을 올린다.
+	clientTranscriptTimeout = 6 * time.Hour
 )
+
+// stageClientTranscribing 은 기기가 받아쓰는 동안 보여 줄 단계명이다.
+//
+// 서버 경로의 「받아쓰는 중」과 일부러 다르게 쓴다 — 실제로 폰이 하고 있는 일이고,
+// 사용자가 앱을 종료하면 멈춘다는 사실이 이 문구에서 드러나야 한다.
+const stageClientTranscribing = "기기에서 받아쓰는 중"
+
+// codeClientTranscriptTimeout 은 기기 받아쓰기가 시간 안에 돌아오지 않았다는 실패 코드다.
+// 🔴 공급자 실패가 아니라 **기기가 돌아오지 않은 것**이므로 재시도 소진과 구분한다.
+const codeClientTranscriptTimeout = "CLIENT_TRANSCRIPT_TIMEOUT"
 
 // 작업 상태. 🔴 이 값을 그대로 API 로 내보내지 마라 — appStatus 로 사상해야 한다.
 const (
@@ -217,6 +238,35 @@ type job struct {
 	// 공급자가 한 번이라도 답하면 0 으로 되돌린다 — 누적 통계가 아니라
 	// 「영영 들어가지 못하는 단계」를 잡기 위한 연속 카운터다.
 	DeferCount int `firestore:"deferCount"`
+
+	// ClientASRAt 는 **이 통화의 받아쓰기를 기기가 맡았다**는 표시이자 그 시작 시각이다.
+	//
+	// 🔴 값이 있으면 tick 은 이 작업을 ASR 로 집지 않는다(§pipeline.step). 상태는
+	// ASR_RUNNING 인데 서버가 공급자를 부르지 않는 유일한 경우라, 이 표시가 없으면
+	// 다음 tick 이 「토큰을 잃어버린 작업」으로 오해해 **서버 ASR 을 부른다** — 기기가
+	// 이미 받아쓰고 있는 통화의 요금을 한 번 더 내게 된다.
+	//
+	// 🔴 시각을 함께 쓰는 이유는 timeout 기준이 필요해서다. UpdatedAt 은 상태를 저장할
+	// 때마다 밀리므로 「언제부터 기다렸는가」를 알 수 없다.
+	//
+	// 전사문이 도착한 뒤에도 지우지 않는다. 이 통화의 받아쓰기 비용이 0원인 근거이고
+	// (§cost.go), 나중에 문서를 눈으로 볼 때 어느 경로로 들어온 통화인지 남는다.
+	ClientASRAt time.Time `firestore:"clientAsrAt"`
+}
+
+// clientASR 은 이 작업의 받아쓰기를 기기가 맡았는지다.
+func (j *job) clientASR() bool { return !j.ClientASRAt.IsZero() }
+
+// stageName 은 지금 상태에 맞는 단계명이다.
+//
+// stageOf 를 그대로 쓰지 않는 이유는 ASR_RUNNING 하나가 두 가지 뜻을 갖기 때문이다 —
+// 서버가 공급자에게 전사를 맡긴 경우와 폰이 직접 받아쓰는 경우다. 사용자에게는 서로
+// 다른 사실이라 문구도 달라야 한다(서버 경로의 문구는 한 글자도 바뀌지 않는다).
+func (j *job) stageName() string {
+	if j.clientASR() && j.State == stateASRRunning {
+		return stageClientTranscribing
+	}
+	return stageOf(j.State)
 }
 
 // fields 는 작업 문서 본문이다. 전체 Set 으로 쓴다.
@@ -248,6 +298,11 @@ func (j *job) fields() map[string]any {
 	}
 	if !j.ErrorAt.IsZero() {
 		m["errorAt"] = j.ErrorAt
+	}
+	// 기기 받아쓰기 표시는 한 번 붙으면 지우지 않는다. 값이 없을 때 키를 넣지 않는 것은
+	// errorAt 과 같은 이유다 — 서버 경로 작업 문서의 모양을 바꾸지 않기 위해서다.
+	if !j.ClientASRAt.IsZero() {
+		m["clientAsrAt"] = j.ClientASRAt
 	}
 	return m
 }

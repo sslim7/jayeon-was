@@ -3,6 +3,7 @@ package calls
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"path"
@@ -22,6 +23,10 @@ import (
 //	앱 → PUT  <서명 URL>                      (앱 → GCS 직접. 서버는 관여하지 않는다)
 //	앱 → POST /calls/{id}/audio/complete     (객체 확인 후 큐잉)
 //	앱 → GET  /calls/{id}                     (진행 상태 폴링)
+//
+// complete 에 `{"asr":"client"}` 를 보내면 **서버가 받아쓰지 않고 기다린다** — 폰이 whisper 로
+// 받아쓴 전사문을 POST /calls/{id}/transcript 로 올리고 분석부터 이어간다(§transcript.go).
+// 오디오 원본은 그때도 그대로 올라간다(재생 기능이 쓴다). 달라지는 것은 받아쓰기 주체뿐이다.
 //
 // 🔴 서버가 오디오를 중계하면 30분 통화 28 MB 가 인스턴스 메모리를 그대로 먹고, Cloud Run
 // 요청 타임아웃(60초) 안에 느린 회선의 업로드가 끝나지 않는다. 중계는 하지 않는다.
@@ -64,6 +69,28 @@ var audioContentTypes = map[string]string{
 func audioObject(uid, callID, ext string) string {
 	return path.Join("calls", uid, callID, "audio") + ext
 }
+
+// completeRequest 는 POST /calls/{id}/audio/complete 의 **선택** 본문이다.
+//
+// 🔴 본문이 아예 없는 요청이 정상이다. 구버전 앱과 웹은 바디 없이 부르고 있고(앱
+// `src/lib/call-api.ts` 의 complete), 그 요청은 여기서 한 글자도 다르게 동작하면 안 된다 —
+// 사용자가 로컬 받아쓰기를 끄면 지금과 완전히 똑같이 도는 것이 이 기능의 안전망이다.
+type completeRequest struct {
+	// ASR 은 **받아쓰기를 누가 하는가**다. 비어 있으면 "server" 다.
+	//
+	//	server — 지금까지의 동작. 서버가 공급자로 전사하고 이어서 분석한다.
+	//	client — 폰이 whisper 로 받아쓴다. 서버는 전사문이 올 때까지 기다리다가
+	//	         POST /calls/{id}/transcript 를 받고 분석부터 이어간다.
+	//
+	// 🔴 오디오 원본은 두 경우 모두 지금처럼 GCS 에 올라간다(재생 기능이 그것을 쓴다).
+	// 달라지는 것은 받아쓰기를 누가 하느냐뿐이다.
+	ASR string `json:"asr"`
+}
+
+const (
+	asrServer = "server"
+	asrClient = "client"
+)
 
 type uploadURLRequest struct {
 	ContentType string   `json:"content_type"`
@@ -198,6 +225,22 @@ func (h *audioHandler) uploadURL(w http.ResponseWriter, r *http.Request, uid, id
 }
 
 func (h *audioHandler) complete(w http.ResponseWriter, r *http.Request, uid, id string) {
+	// 🔴 본문이 없으면 io.EOF 다 — **그것이 기존 요청의 모양이고 정상이다.**
+	// 빈 본문을 400 으로 만들면 지금 돌고 있는 앱과 웹이 전부 멈춘다.
+	var in completeRequest
+	if derr := httpx.DecodeBody(r, &in); derr != nil && !errors.Is(derr, io.EOF) {
+		httpx.WriteError(w, 400, httpx.CodeValidationFailed, "요청 값을 확인해 주세요")
+		return
+	}
+	switch in.ASR {
+	case "", asrServer, asrClient:
+	default:
+		// 모르는 값을 서버 받아쓰기로 눙치지 않는다. 앱이 오타를 냈다면 요금이 나가는
+		// 쪽으로 조용히 흐르는 것보다 400 으로 알려 주는 편이 낫다.
+		httpx.WriteError(w, 400, httpx.CodeValidationFailed, "받아쓰기 방식을 확인해 주세요")
+		return
+	}
+
 	j, err := h.load(r.Context(), uid, id)
 	if err != nil {
 		writeJobError(w, err, "통화를 찾을 수 없어요")
@@ -228,10 +271,22 @@ func (h *audioHandler) complete(w http.ResponseWriter, r *http.Request, uid, id 
 	now := h.clock()
 	j.Audio.Size = size
 	j.State = stateQueued
-	j.Stage = stageOf(stateQueued)
-	j.Progress = progressOf(stateQueued)
-	j.UpdatedAt = now
 	j.NextAttemptAt = now
+	if in.ASR == asrClient {
+		// 🔴 **큐에 넣지 않는다.** 폰이 지금 받아쓰는 중이므로 서버가 할 일은 기다리는 것뿐이다.
+		// 상태를 ASR_RUNNING 으로 두는 이유는 사실이 그렇기 때문이고(누가 하느냐만 다르다),
+		// CallStatus 는 닫힌 집합이라 새 값을 만들지 않는다 — 앱은 그대로 TRANSCRIBING 을 본다.
+		//
+		// 🔴 다음 확인 시각을 마감(지금 + 6시간)으로 둔다. now 로 두면 이 작업이 매분 tick 에
+		// 잡혀 6시간 내내 아무 일도 하지 않는 조회·쓰기만 쌓는다. 스윕 쿼리가 nextAttemptAt
+		// 오름차순이라 미래로 밀어 둔 작업은 다른 통화의 순서를 막지 않는다(§job.Claim).
+		j.State = stateASRRunning
+		j.ClientASRAt = now
+		j.NextAttemptAt = now.Add(clientTranscriptTimeout)
+	}
+	j.Stage = j.stageName()
+	j.Progress = progressOf(j.State)
+	j.UpdatedAt = now
 	j.ErrorCode, j.ErrorKind, j.ErrorAt = "", "", time.Time{}
 
 	// 🔴 **플레이스홀더 통화 레코드를 여기서 만든다.** 이것이 있어야 앱이 이미 쓰고 있는
@@ -382,7 +437,7 @@ func (h *audioHandler) reanalyze(w http.ResponseWriter, r *http.Request, uid, id
 
 	now := h.clock()
 	j.State = stateTranscribed
-	j.Stage = stageOf(stateTranscribed)
+	j.Stage = j.stageName()
 	j.Progress = progressOf(stateTranscribed)
 	j.HasAnalysis = false
 	j.AnalysisAttempt = 0
@@ -510,4 +565,6 @@ func (h *audioHandler) register(mux *http.ServeMux, guard func(http.Handler) htt
 	mux.Handle("POST /calls/{id}/audio/upload-url", wrap(h.uploadURL))
 	mux.Handle("POST /calls/{id}/audio/complete", wrap(h.complete))
 	mux.Handle("POST /calls/{id}/reanalyze", wrap(h.reanalyze))
+	// 기기 받아쓰기 경로의 마지막 단계다(§transcript.go). 서버 받아쓰기 경로는 이 라우트를 쓰지 않는다.
+	mux.Handle("POST /calls/{id}/transcript", wrap(h.transcript))
 }

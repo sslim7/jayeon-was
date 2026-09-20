@@ -61,6 +61,16 @@
 
 **싼 곳이 하나도 없다.** 가장 근접한 Speechmatics 가 2% 비싸고 나머지는 1.3~7.6배다.
 
+⚠️ **알리바바의 별도 ASR 서비스 ISI(智能语音交互)로 옮기자는 제안은 §7 에서 확인하고 버렸다** —
+더 비싸고(약 2.7배) 중국 본토 리전 전용이다.
+
+현행 `qwen-audio-3.0-asr-flash-filetrans` 는 **2026-10-10 Model Studio 음성 레거시 EoS 대상이
+아니다**(확인 2026-09-19). 공지 대상은 `qwen-tts` 계열 3종 + `gummy-realtime-v1` + TTS 스냅샷
+5종이고 **ASR 은 0건**이다. 우리 모델은 국제·중문 문서 양쪽에서 여전히 「권장 모델」로 실려 있다.
+주력 모델은 종료 3개월 전에 공지되므로 갑자기 끊기지 않는다.
+⚠️ 중문 공지(118331/118332)의 대상 표는 렌더링 실패로 직접 대조하지 못했다.
+출처: https://www.alibabacloud.com/en/notice/modelstudiospeech_series_legacy_mainline_models_eos_notice_792 (확인 2026-09-19)
+
 ### 화자 분리 미지원 (후보 아님, 참고용)
 
 | 공급자 / 모델 | 1건 | 왜 못 쓰는가 |
@@ -266,3 +276,141 @@ Claude 로 옮긴다면 스키마에서 `minimum`/`maximum`/`minLength` 를 걷�
 7. Anthropic 배치 API 지연 SLA, 구조화 출력과 extended thinking 병용 가능 여부.
 8. Claude 는 토크나이저가 달라 같은 한국어 원문에서 토큰이 더 나올 수 있다. 표의 79.8원은
    동일 토큰 수 가정이고, +30% 를 가정하면 약 103.7원이 된다.
+
+---
+
+## 7. 추가 조사 — Alibaba ISI 로 옮기자는 제안 (2026-09-19)
+
+외부에서 「Model Studio(DashScope) 대신 알리바바의 독립 ASR 서비스인 Intelligent Speech
+Interaction(智能语音交互, ISI)으로 옮기면 **시간당 $1.00**이고 **매일 2시간 무료 할당량**이 있다」는
+제안을 받아 확인했다. **두 숫자 모두 사실이 아니었다.**
+
+### 「매일 2시간 무료」 = 신규 사용자 3개월 체험 한정
+
+공식 문서가 무료 한도를 **신규 사용자 체험 기간**으로 명확히 한정한다.
+
+> "During the three-month trial period for new users, you can transcribe up to two hours of
+> recordings free of charge every 24 hours."
+>
+> "新用户试用期3个月内，每隔24小时可免费识别2小时时长的文件转写服务。免费额度用完后，间隔24小时后可继续试用。"
+
+- 출처: https://www.alibabacloud.com/help/en/isi/developer-reference/api-reference-2 /
+  https://help.aliyun.com/zh/isi/developer-reference/api-reference-2 (확인 2026-09-19)
+- 체험판 제약: 동시 호출 **2채널**, 결과 반환 **최대 24시간**(상용판은 3시간 이내).
+  출처: https://help.aliyun.com/zh/isi/getting-started/start-here (확인 2026-09-19)
+- 3개월이 지나면 상용판으로 전환되고 실사용량 과금이다. **상시 무료가 아니다.**
+
+### 「시간당 $1.00」 = 공시 근거 없음
+
+실제 공시가는 중국 사이트에만 있고 **CNY 후불 종량제 + 일일 사용량 계단 할인**이다.
+
+| 일일 사용량 구간 | 단가 (CNY/시간) |
+|---|---|
+| 0~299시간 | **2.50** |
+| 300~999시간 | 2.20 |
+| 1,000~2,999시간 | 1.80 |
+| 3,000~4,999시간 | 1.50 |
+| 5,000시간 초과 | **1.00** |
+
+선불 리소스 패키지도 있다: 40시간 CNY 100(2.50/h), 1,000시간 CNY 1,200(1.20/h),
+20,000시간 CNY 20,000(1.00/h).
+출처: https://help.aliyun.com/zh/isi/product-overview/billing-10 (확인 2026-09-19, 영문판 동일 수치)
+
+🔴 **$1.00 은 일 5,000시간 초과 구간의 CNY 1.00/시간을 달러로 오독한 것으로 보인다.**
+우리 사용량은 월 300건 기준 **약 월 140시간**이라 일일 계단 할인 구간(일 300시간 이상)에
+**영영 도달하지 못한다** — 항상 최상단 **CNY 2.50/시간**이다.
+
+⚠️ **국제 사이트(alibabacloud.com)에는 USD 요금표 자체가 없다.** 가격 문서가 과금 단위
+("Billed by recording duration")만 기술한다.
+출처: https://www.alibabacloud.com/help/en/isi/product-overview/pricing (확인 2026-09-19, 최종 갱신 2026-09-03)
+
+⚠️ 闲时版(off-peak, 24시간 내 결과 반환) 상품이 별도로 존재하나 **가격 공시를 찾지 못했다(확인 불가).**
+
+### 비용 비교
+
+| | 건당(28분) | 월 60건 | 월 300건 |
+|---|---|---|---|
+| **현행 `qwen-audio-3.0-asr-flash-filetrans`** | **82.7원** | **4,962원** | **24,810원** |
+| ISI 후불 CNY 2.50/시 | 약 228원 | 약 13,700원 | 약 68,400원 |
+
+**약 2.7배 비싸다.**
+
+⚠️ 환율 주의: 위 원화 환산은 **1 CNY ≈ 195원 가정**이고, 이 환율은 §0 의 USD 환율과 달리
+**검증하지 않았다.** 다만 배수(2.7배)는 환율이 다소 틀려도 뒤집히지 않는다.
+
+### 리전·데이터 소재지
+
+🔴 **녹음 파일 인식 엔드포인트는 중국 본토 3개뿐이다.**
+
+| 엔드포인트 | 리전 |
+|---|---|
+| `filetrans.cn-shanghai.aliyuncs.com` | 상하이 |
+| `filetrans.cn-beijing.aliyuncs.com` | 베이징 |
+| `filetrans.cn-shenzhen.aliyuncs.com` | 선전 |
+
+국제 사이트 영문 문서도 같은 3개만 나열한다. 실시간 인식·TTS 는 싱가포르 게이트웨이
+(`nls-gateway-ap-southeast-1.aliyuncs.com`)가 있으나 **파일 인식의 싱가포르 엔드포인트는
+문서에 없다.**
+
+개인 계정은 **실명인증이 필요하다.** 국제 사이트 계정도 중국 본토 리전 자원을 쓰려면
+실명인증이 필요하다. 출처: https://help.aliyun.com/zh/isi/getting-started/start-here (확인 2026-09-19)
+
+⚠️ **한국 고객 상담 녹음이 중국 본토로 전송·처리된다.** 현행 Model Studio 가 싱가포르를
+쓸 수 있는 것과 대비된다.
+
+확인 불가: 국제 사이트 계정으로 filetrans 를 실제 결제·사용할 수 있는지(콘솔 실측 필요).
+
+### 한국어와 화자 분리
+
+- 한국어 모델은 **존재한다**: 「통용-한국어(通用-韩语)」, **16k 샘플레이트**, 구두점·ITN 지원.
+  영문 문서에도 "General - Korean" 으로 동일하게 기재돼 있다.
+- ⚠️ **8k(전화 녹음) 한국어 모델은 목록에 없다.** 상담 통화가 8k 라면 리샘플링이 필요하고
+  정확도 열화 위험이 있다.
+- 화자 분리는 `auto_split` 파라미터, `speaker_num` 2~100 으로 지정한다. 단 공식 문구가
+  "此参数只能辅助算法尽量输出指定人数，无法保证一定会输出此人数" — **지정 인원수를 보장하지
+  않는다.** 16kHz 오디오는 기본적으로 첫 채널만 분리한다.
+- 🔴 **한국어 모델에서 화자 분리가 동작하는지는 문서로 확인조차 되지 않는다.** 화자 분리
+  설명이 전부 8k 중국어 전화 시나리오 기준으로 서술돼 있고 한국어는 16k 전용이라, 그 조합의
+  지원 여부가 어디에도 없다. **가장 큰 미확인 리스크다.** §1 이 화자 분리를 타협 불가 조건으로
+  잡은 이상, 이 하나만으로도 후보 자격이 흔들린다.
+- 출처(위 셋 공통): https://help.aliyun.com/zh/isi/developer-reference/api-reference-2 (확인 2026-09-19)
+
+### 엔진 세대 — 옮기면 후퇴다
+
+🔴 ISI 녹음 파일 인식의 「통용-XX어」는 **Paraformer 세대**다. Model Studio 공식 문서가
+Paraformer 를 "older-generation ASR model family / 较早一代的ASR模型" 로 규정하고
+**"建议迁移到 Fun-ASR 或 Qwen-ASR"**(Fun-ASR 또는 Qwen-ASR 로 이전할 것)라고 명시한다.
+
+출처: https://www.alibabacloud.com/help/en/model-studio/asr-model /
+https://help.aliyun.com/zh/model-studio/asr-model (확인 2026-09-19)
+
+즉 **알리바바 스스로 ISI 계열 엔진을 구세대로 분류하고, 지금 우리가 쓰는 쪽으로 옮기라고
+권고한다.** 제안은 방향이 반대다.
+
+### 연동 비용
+
+- ISI 는 Model Studio/DashScope 와 **접근 체계가 다르다.** AppKey + 아리클라우드 POP 스타일
+  SDK(`filetrans.*.aliyuncs.com`)이고 DashScope API Key 방식이 아니다 →
+  **클라이언트 코드 전면 교체가 필요하다.**
+- 파일은 **HTTP URL 로 접근 가능해야 한다**(직접 업로드가 아니다) → 공개 URL 또는 서명 URL
+  호스팅이 필요하다. 우리는 이미 GCS 서명 URL 을 쓰므로 이 부분은 큰 장애가 아니다.
+- 비동기 흐름: POST 로 파일 URL 제출 → TaskId → GET 폴링. 서버 결과 보관 72시간.
+- 상한: 오디오 ≤512MB, 비디오 ≤2GB, 총 길이 ≤12시간 (28분 통화는 여유롭게 충족).
+- 출처: https://help.aliyun.com/zh/isi/getting-started/sdk-and-api-references (확인 2026-09-19)
+
+### 판정
+
+1. **비용상 이득이 없다** — 약 2.7배 비싸고, 무료 할당량은 3개월 체험 한정이다.
+2. **기술·규제 리스크가 더 크다** — 중국 본토 리전 전용 + 실명인증, 8k 한국어 모델 없음,
+   한국어 화자 분리 지원 여부 확인 불가.
+3. **엔진이 후퇴다** — 알리바바 자신이 Paraformer → Qwen-ASR 이전을 권고한다.
+
+**옮기지 않는다.**
+
+### 이 절에서 확인하지 못한 것
+
+1. 국제 사이트(alibabacloud.com)의 ISI USD 요금표 — **공시 자체가 없다.**
+2. 闲时版(off-peak) 단가.
+3. 한국어 모델과 화자 분리의 **동시 지원 여부** — 이 절에서 가장 큰 미확인 항목이다.
+4. 국제 사이트 계정으로 filetrans 를 결제·사용할 수 있는지.
+5. 한국어 모델의 정확도 지표(WER 등 공시 없음).

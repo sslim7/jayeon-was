@@ -229,6 +229,13 @@ func (p *pipeline) wait(ctx context.Context, d time.Duration) error {
 // 반환 error 는 **저장조차 못 했을 때**다. 공급자 실패는 error 가 아니라 상태로 바뀌어
 // 문서에 남는다 — 그래야 다음 tick 이 이어서 판단할 수 있다.
 func (p *pipeline) step(ctx context.Context, j *job, b stepBudget) (stepResult, error) {
+	// 🔴 **기기가 받아쓰는 통화에는 서버 ASR 을 부르지 않는다.** 이 검사가 아래 switch 보다
+	// 먼저 와야 한다 — 서버 경로에서 「ASR_RUNNING 인데 토큰이 없다」는 Start 도중 인스턴스가
+	// 죽었다는 뜻이라 곧바로 stepStart 로 가는데, 기기 경로의 작업은 **늘 그 모양이다.**
+	// 순서가 뒤집히면 폰이 이미 받아쓰고 있는 통화를 공급자에게 한 번 더 맡긴다(요금 두 배).
+	if j.clientASR() && j.State == stateASRRunning {
+		return p.stepClientWait(ctx, j)
+	}
 	switch j.State {
 	case stateQueued:
 		return p.stepStart(ctx, j, b)
@@ -243,6 +250,30 @@ func (p *pipeline) step(ctx context.Context, j *job, b stepBudget) (stepResult, 
 		return p.stepPoll(ctx, j, b)
 	case stateTranscribed, stateAnalyzing:
 		return p.stepAnalyze(ctx, j, b)
+	}
+	return stepDone, nil
+}
+
+// stepClientWait 는 **기기 받아쓰기를 기다리는 작업을 청소한다.**
+//
+// 하는 일은 둘뿐이다: 기다릴 시간이 남았으면 다음 확인 시각을 마감으로 밀어 두고 나가고,
+// 마감이 지났으면 확정 실패로 세운다. 공급자는 한 번도 부르지 않는다.
+//
+// 🔴 다음 확인 시각을 마감으로 미는 것이 중요하다. 그대로 두면 이 작업이 **매분 tick 의
+// 스윕 쿼리에 잡혀** 6시간 동안 아무 일도 하지 않는 조회·쓰기만 쌓는다. 스윕 쿼리는
+// nextAttemptAt 오름차순이라 미래로 밀린 작업은 뒤로 가 다른 통화의 순서를 막지도 않는다.
+func (p *pipeline) stepClientWait(ctx context.Context, j *job) (stepResult, error) {
+	deadline := j.ClientASRAt.Add(clientTranscriptTimeout)
+	if !p.clock().Before(deadline) {
+		// 🔴 기기가 돌아오지 않았다. 이 자리를 비워 두면 그 통화는 영원히
+		// 「기기에서 받아쓰는 중」으로 남는다 — 사용자는 서버가 일하고 있다고 믿는다.
+		log.Printf("calls: 기기 받아쓰기가 %s 안에 돌아오지 않았다 call=%s — 확정 실패로 정리한다",
+			dur(clientTranscriptTimeout), j.CallID)
+		return p.failTerminal(ctx, j, phaseASR, codeClientTranscriptTimeout, callai.KindPermanent.String(), nil, p.clock().Sub(j.ClientASRAt))
+	}
+	j.NextAttemptAt = deadline
+	if err := p.persist(ctx, j); err != nil {
+		return stepDone, err
 	}
 	return stepDone, nil
 }
@@ -620,7 +651,7 @@ func (p *pipeline) failTerminal(ctx context.Context, j *job, ph phase, code, kin
 
 // persist 는 작업 문서를 저장하고 통화 레코드의 요약을 같은 상태로 맞춘다.
 func (p *pipeline) persist(ctx context.Context, j *job) error {
-	j.Stage = stageOf(j.State)
+	j.Stage = j.stageName()
 	j.Progress = progressOf(j.State)
 	j.UpdatedAt = p.clock()
 	if err := p.jobs.Put(ctx, j); err != nil {

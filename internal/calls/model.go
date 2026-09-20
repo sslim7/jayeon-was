@@ -266,17 +266,8 @@ func validateCommon(r *Record, id string) error {
 	if r.AI != nil && (!validText(r.AI.Model, 200, true) || !validText(r.AI.ModelVersion, 200, true) || !validText(r.AI.Provider, 200, false)) {
 		return invalid
 	}
-	if t := r.Transcript; t != nil {
-		if !validText(t.Text, maxTranscriptTextBytes, true) || t.Segments == nil || len(t.Segments) > 20000 {
-			return invalid
-		}
-		last := float64(0)
-		for _, s := range t.Segments {
-			if s.Start < last || s.End < s.Start || s.End > 86400 || !validText(s.Text, 64000, true) || !validText(s.Speaker, 100, false) {
-				return invalid
-			}
-			last = s.Start
-		}
+	if t := r.Transcript; t != nil && !validTranscript(t) {
+		return invalid
 	}
 	a := r.Analysis
 	if a == nil {
@@ -311,6 +302,25 @@ func validateCommon(r *Record, id string) error {
 		}
 	}
 	return nil
+}
+
+// validTranscript 는 전사문 하나가 저장 규약을 지키는지다.
+//
+// 🔴 기기 업로드(PUT /calls/{id})와 기기 받아쓰기(POST /calls/{id}/transcript)가 **같은
+// 함수를 쓴다.** 규칙을 두 벌로 두면 한쪽만 느슨해지고, 그쪽으로 들어온 원문은 저장까지
+// 간 뒤 다음 단계에서야 거부된다 — 그때는 이미 분석 요금이 나간 뒤다.
+func validTranscript(t *Transcript) bool {
+	if !validText(t.Text, maxTranscriptTextBytes, true) || t.Segments == nil || len(t.Segments) > 20000 {
+		return false
+	}
+	last := float64(0)
+	for _, s := range t.Segments {
+		if s.Start < last || s.End < s.Start || s.End > 86400 || !validText(s.Text, 64000, true) || !validText(s.Speaker, 100, false) {
+			return false
+		}
+		last = s.Start
+	}
+	return true
 }
 
 // validate 는 **기기 업로드 규약**이다. 여기서만 ai.processed_on_device 를 요구하고
