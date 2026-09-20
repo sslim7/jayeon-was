@@ -65,6 +65,11 @@ type Pricing struct {
 type CostUsage struct {
 	// AudioSeconds 는 ASR 이 청구한 오디오 길이다. 통화 길이와 다를 수 있다 —
 	// 재시도한 전사의 초까지 **누적**된 값이기 때문이다(§pipeline.go 의 Usage 누적 주석).
+	//
+	// 🔴 **기기에서 받아쓴 통화는 0 이다**(asr:"client", §transcript.go). 서버가 공급자를
+	// 한 번도 부르지 않았으므로 받아쓰기에 든 돈이 실제로 0원이다 — 통화 길이를 여기에
+	// 옮겨 적으면 쓰지도 않은 요금이 화면에 뜨고, 그 숫자는 진짜와 구분되지 않는다.
+	// 분석(LLM) 비용은 서버 경로와 똑같이 든다.
 	AudioSeconds float64 `json:"audio_seconds"`
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
