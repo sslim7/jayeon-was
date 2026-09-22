@@ -11,9 +11,9 @@
 - Template `{id,name,message,attachments:Attachment[],createdAt,updatedAt}`.
 - GET /sms/templates?limit=50&cursor=...: `{items,nextCursor}`. POST /sms/templates 및 PUT /sms/templates/{id}: `{name,message,attachmentIds:string[]}`. GET/DELETE /sms/templates/{id}.
 - POST /sms/campaigns 기존 입력 + 선택 `attachmentIds:string[]`. Campaign 및 CampaignRecipient 응답에 `attachments:Attachment[]` 추가. 이름/메시지/첨부는 생성 시 snapshot 고정. 첨부가 있으면 빈 메시지도 허용.
-- POST /recipients/imports/preview JSON `{name,mimeType,dataBase64}`: xlsx 첫 시트, 필수 헤더 `이름`과 `전화번호` 또는 `연락처`, 선택 헤더 `그룹` (영문 `name,phone,groupId` 가능). 최대 200 데이터행, 2MiB. 전화번호는 텍스트 셀 권장.
+- POST /recipients/imports/preview JSON `{name,mimeType,dataBase64}`: xlsx 첫 시트, 필수 헤더 `이름`과 `전화번호` 또는 `연락처`, 선택 헤더 `그룹` (영문 `name,phone,groupId` 가능). 2MiB. 데이터행 수는 제한하지 않고 나누어 저장한다(서버 메모리 안전선 10000행에 닿으면 실제 행 수를 담은 400). 전화번호는 텍스트 셀 권장. 거절은 사유가 담긴 한국어 문장으로 돌려준다.
 - Preview 응답 `{id,addedCount,excludedCount,items:[{row,name,phone,groupId,status:'ADD'|'EXCLUDED',reason:string}],createdAt}`. 제외 원인 한국어. 기존 번호 및 파일내 중복/유효하지 않은 행 제외.
-- POST /recipients/imports/{id}/confirm 빈 JSON: 동일 shape, 실제 추가/제외 결과. preview 시 제외 행은 그대로 제외하고 ADD 행만 commit 때 중복 재검증. 같은 import ID 반복 confirm은 최초 결과 반환. 한 transaction 원자적으로 저장.
+- POST /recipients/imports/{id}/confirm 빈 JSON: 동일 shape, 실제 추가/제외 결과. preview 시 제외 행은 그대로 제외하고 ADD 행만 commit 때 중복 재검증. 같은 import ID 반복 confirm은 최초 결과 반환. 저장은 청크(200행·500KiB)마다 transaction 하나로 원자적이며, 중간에 끊기면 다음 호출이 `confirmedChunks` 부터 이어 간다.
 
 최종 발송일시와 history는 SENT/FAILED 결과 저장과 동일 transaction에 기록한다. 예전 데이터 history는 과거 캠페인 snapshot에서 조회하는 fallback을 제공한다.
 
@@ -27,7 +27,7 @@
 - GET /recipients는 이름(유니코드 문자열)/ID 오름차순이고 `{items,nextCursor,total}`을 반환한다. total은 q/groupId/includeSent 필터를 모두 적용한 전체 수이며 다음 페이지도 같은 필터를 사용한다.
 - 템플릿의 attachments는 기존 DB값이 null이거나 누락되어도 HTTP 응답에서 항상 `[]`로 정규화한다.
 
-Excel의 첫 행은 열 제목이며 두 번째 행부터 데이터를 읽는다. 추가 항목을 포함한 사전검증 결과 전체가 750KiB를 초과하면 저장 전에 명확한 400 오류를 반환하며 사용자가 파일을 나누도록 안내한다. 값을 임의로 잘라 저장하지 않는다.
+Excel의 첫 행은 열 제목이며 두 번째 행부터 데이터를 읽는다. 사전검증 결과는 `recipientImports/{id}` 메타와 `chunks/{n}` 하위 문서로 나눠 저장한다(청크당 200행·500KiB 이하). 한 행 자체가 청크 한도를 넘으면 그 행 번호를 지목한 400을 반환한다. 값을 임의로 잘라 저장하지 않는다.
 
 전화번호 신규 입력/Excel은 하이픈 제거 후 `^010[0-9]{8}$`만 허용하며 저장값은 11자리 숫자다. +82 신규 입력도 제외한다. 기존 +8210 DB값은 내부적으로만 국내형으로 읽고 두 형식의 번호 잠금을 확인해 중복 등록을 막는다. 과거 캠페인 원본 스냅샷은 변경하지 않는다.
 

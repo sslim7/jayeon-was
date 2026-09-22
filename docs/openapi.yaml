@@ -549,7 +549,7 @@ paths:
     post:
       tags:
       - messaging
-      summary: xlsx 2MiB 200행 사전검증 이름과 전화번호 또는 연락처 필수, 그룹 선택
+      summary: xlsx 2MiB 사전검증(행 수 제한 없음, 청크 저장) 이름과 전화번호 또는 연락처 필수, 그룹 선택
       responses:
         '200':
           description: 성공
