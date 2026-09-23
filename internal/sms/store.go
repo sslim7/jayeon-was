@@ -65,6 +65,8 @@ func (s *FirestoreStore) Create(ctx context.Context, uid string, req CreateReque
 		}
 		attachments, e := messaging.Resolve(tx, s.Client, uid, req.AttachmentIDs)
 		if e != nil {
+			// messaging.ValidationError 는 여기서 갈지 않고 그대로 올려보낸다. fail() 이 그 문장을
+			// 사용자에게 보여 준다. ErrValidation 으로 바꾸면 고정 문구에 덮여 사유가 사라진다.
 			if errors.Is(e, messaging.ErrInvalid) {
 				return ErrValidation
 			}

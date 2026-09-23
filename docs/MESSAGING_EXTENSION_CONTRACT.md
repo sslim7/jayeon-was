@@ -5,7 +5,7 @@
 - Recipient: 기존 필드 + `latestSentAt:string|null`(SENT만).
 - POST/PUT /recipients: 기존 입력 유지. GET /recipients: `includeSent=false`이면 SENT 이력 없는 사람만, true/미지정 전체.
 - GET /recipients/{id}/history?limit=50&cursor=...: `{items:[{id,campaignId,campaignTitle,recipientId,name,phone,message,status,sentAt,failedAt,errorCode,errorMessage,createdAt,updatedAt,attachments:Attachment[]}],nextCursor}`. 최신 결과 우선, 시도별 이력.
-- Attachment `{id,name,mimeType,size,createdAt}`. JPEG/PNG만, 개별 300KiB 이하, 캠페인/템플릿당 최대 3개, 총 600KiB 이하. 원본 바이트는 별도 문서로 관리하고 snapshot에는 메타데이터만 저장.
+- Attachment `{id,name,mimeType,size,createdAt}`. JPEG/PNG만, 개별 700KiB 이하, 캠페인/템플릿당 최대 3개, 총 1400KiB 이하(이건 서버 저장 한도이고 실제 발송 가능 크기는 단말이 SIM에서 읽는 `MMS_CONFIG_MAX_MESSAGE_SIZE`로 통신사가 따로 정하므로 앱이 첨부 시점에 이미지를 줄인다). 원본 바이트는 별도 문서로 관리하고 snapshot에는 메타데이터만 저장. 거절은 사유와 실제 값(크기·해상도·감지한 형식)이 담긴 한국어 문장으로 돌려준다. HEIC/HEIF/AVIF는 `ftyp` 브랜드를 직접 읽어 형식을 지목한다(`http.DetectContentType`이 모른다).
 - POST /sms/attachments JSON `{name,mimeType,dataBase64}`: 201 Attachment.
 - GET /sms/attachments/{id}/content: `{...Attachment,dataBase64}`. GET /sms/attachments/{id}: 메타데이터. DELETE 동일 경로: 204 논리삭제(기존 캠페인/템플릿 참조는 다운로드 가능).
 - Template `{id,name,message,attachments:Attachment[],createdAt,updatedAt}`.
