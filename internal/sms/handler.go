@@ -8,6 +8,7 @@ import (
 	"cloud.google.com/go/firestore"
 	"github.com/sslim7/nature-was/internal/auth"
 	"github.com/sslim7/nature-was/internal/httpx"
+	"github.com/sslim7/nature-was/internal/messaging"
 )
 
 type Handler struct{ store Store }
@@ -32,6 +33,14 @@ func register(mux *http.ServeMux, h *Handler, guard func(http.Handler) http.Hand
 	}
 }
 func fail(w http.ResponseWriter, err error) {
+	// 🔴 messaging.ValidationError 는 사용자에게 그대로 보여 줄 문장을 들고 온다(첨부 합계 초과 등).
+	// 이걸 먼저 잡지 않으면 아래 어느 case 에도 안 걸려 default 로 떨어지고, 이유가 분명한 거절이
+	// 「서버 오류가 생겼어요」 500 으로 둔갑한다.
+	var invalid messaging.ValidationError
+	if errors.As(err, &invalid) {
+		httpx.WriteError(w, 400, httpx.CodeValidationFailed, invalid.Message)
+		return
+	}
 	switch {
 	case errors.Is(err, ErrValidation):
 		httpx.WriteError(w, 400, httpx.CodeValidationFailed, "요청 값이 올바르지 않아요")

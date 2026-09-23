@@ -359,7 +359,7 @@ paths:
     post:
       tags:
       - messaging
-      summary: JPEG/PNG 업로드 개별300KiB
+      summary: JPEG/PNG 업로드 개별700KiB(저장 한도, 발송 한도는 단말·통신사가 별도)
       responses:
         '201':
           description: 성공
@@ -451,7 +451,7 @@ paths:
     post:
       tags:
       - messaging
-      summary: 템플릿 등록 최대3개 총600KiB
+      summary: 템플릿 등록 최대3개 총1400KiB(저장 한도)
       responses:
         '201':
           description: 성공
