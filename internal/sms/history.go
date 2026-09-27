@@ -98,8 +98,14 @@ func boundKey(at time.Time) string {
 // History는 계정 하위 캠페인만 읽고 완료 시도 문서와 이전 버전 스냅샷을 합친다.
 // 원본 수신자 삭제나 재시도 후 READY 변경이 과거 발송 이력을 지우지 않는다.
 //
-// 아직 보내지 않은 사람(READY·SENDING)도 함께 내려간다. 화면이 「성공 N · 실패 N · 미발송 N」
-// 을 세고 미발송자 명단을 펼쳐 한 명씩 다시 보낼 수 있으려면 전원이 있어야 한다.
+// 🔴 **한 번이라도 시작된 발송(Campaign.StartedAt != nil)만** 이력에 들어온다. 그 안에서는
+// 아직 보내지 않은 사람(READY·SENDING)도 함께 내려간다 — 화면이 「성공 N · 실패 N · 미발송 N」
+// 을 세고 미발송자 명단을 펼쳐 한 명씩 다시 보낼 수 있으려면 그 발송의 전원이 있어야 한다.
+//
+// 예약만 해 두고 한 번도 보내지 않은 캠페인은 통째로 뺀다. 그 사람들에게는 **발송 일자라는 것이
+// 아예 없는데**, 넣어 두면 historyTime() 이 UpdatedAt(레코드를 마지막으로 건드린 시각)을 집어
+// 「9월 23일 · 미발송 39명」처럼 그날 아무 일도 겪지 않은 사람들이 그 날짜에 붙어 버린다.
+// 예약은 「발송 이력」이 아니라 화면의 예약 목록이 맡는다.
 //
 // from/to 는 historyTime() 기준이다. 🔴 정렬·묶기와 **같은 시각**을 봐야 「목록엔 있는데
 // 기간에서 빠진다」가 안 생긴다. 다른 시각(CreatedAt 등)으로 자르면 아무 오류 없이 어긋난다.
@@ -140,6 +146,14 @@ func (s *FirestoreStore) History(ctx context.Context, uid, q string, limit int, 
 			return out, e
 		}
 		d.Campaign.ID = doc.Ref.ID
+		// 🔴 발송이 시작된 적 없는 캠페인은 시도 줄도 대기 줄도 만들지 않는다. 「발송 이력」은
+		// 실제로 일어난 발송의 기록이라, 아직 아무 일도 없었던 예약은 설 자리가 없다.
+		// ⚠️ 상태(Status)로 거르면 안 된다. 시작했다가 CANCELLED 된 캠페인은 그날 실제로 발송을
+		// 돌렸고 남은 사람이 못 나간 것이므로 그 날짜의 「미발송」이 맞다 — StartedAt 하나로 가른다.
+		started := d.Campaign.StartedAt
+		if started == nil {
+			continue
+		}
 		attempts, e := doc.Ref.Collection("attempts").Documents(ctx).GetAll()
 		if e != nil {
 			return out, e
@@ -204,6 +218,13 @@ func (s *FirestoreStore) History(ctx context.Context, uid, q string, limit int, 
 				waiting.ErrorCode = ""
 				waiting.ErrorMessage = ""
 				waiting.Transport = ""
+				// 🔴 대기 줄의 시각은 **그 발송이 시작된 시각**이다. r.UpdatedAt 을 쓰면 안 된다 —
+				// 그 값은 레코드를 마지막으로 건드린 시각이라 재시도로 READY 로 되돌린 순간이나
+				// 취소한 순간이 들어온다. 그러면 아무 오류 없이 「오늘 · 미발송 16명」으로 떠서,
+				// 실제로는 9월 23일 발송에서 안 나간 사람이 오늘 발송인 척 섞인다.
+				// ⚠️ SentAt·FailedAt 은 계속 nil 이다 — 나가지도 실패하지도 않았다. 시각만
+				// StartedAt 으로 채워 historyTime() 이 그 발송의 날짜로 묶게 한다.
+				waiting.UpdatedAt = *started
 				h := historyItem(d.Campaign, waiting)
 				h.ID = pendingHistoryID(d.Campaign, r)
 				merged[h.ID] = h
