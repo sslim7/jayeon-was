@@ -36,9 +36,19 @@ Excel의 첫 행은 열 제목이며 두 번째 행부터 데이터를 읽는다
 
 ## 문자보내기 전체 발송이력
 
-`GET /sms/history?q=이름또는번호뒷자리&limit=50&cursor=...` → `{items: RecipientHistory[],nextCursor:string|null,total:number}`. q는 발송 당시 snapshot 의 **이름 부분검색(대소문자 무시) 또는 전화번호 부분검색(뒷자리 포함)** 이며 최대 100자다. 하이픈·공백·괄호·`+82` 표기 차이는 양쪽 모두 걷어 내고 숫자만 비교하고, 글자와 숫자가 섞이면 글자는 이름·숫자는 번호를 가리킨다(`김영 7649`). 규칙은 앱 `src/lib/recipient-search.ts` 및 `GET /calls?q=` 와 같으며 서버는 `internal/recipients/search.go` 한 곳에 둔다. limit은 1~100, 기본 50이다. 기존 수신자별 이력과 동일한 row shape(`campaignTitle`, 항상 배열인 `attachments` 포함)를 반환한다.
+`GET /sms/history?q=이름또는번호뒷자리&from=...&to=...&limit=50&cursor=...` → `{items: RecipientHistory[],nextCursor:string|null,total:number}`. q는 발송 당시 snapshot 의 **이름 부분검색(대소문자 무시) 또는 전화번호 부분검색(뒷자리 포함)** 이며 최대 100자다. 하이픈·공백·괄호·`+82` 표기 차이는 양쪽 모두 걷어 내고 숫자만 비교하고, 글자와 숫자가 섞이면 글자는 이름·숫자는 번호를 가리킨다(`김영 7649`). 규칙은 앱 `src/lib/recipient-search.ts` 및 `GET /calls?q=` 와 같으며 서버는 `internal/recipients/search.go` 한 곳에 둔다. limit은 1~100, 기본 50이다. 기존 수신자별 이력과 동일한 row shape(`campaignTitle`, 항상 배열인 `attachments` 포함)를 반환한다.
 
-순서는 `sentAt`, 없으면 `failedAt`, 둘 다 없으면 `updatedAt`의 내림차순이며 같은 시각에는 고유 이력 ID 내림차순이다. 완료된 SENT/FAILED 시도와 현재 SENDING 시도를 포함하고, 아직 시도하지 않은 READY는 제외한다. 실패 후 재시도 준비로 READY가 되어도 이전 실패 시도는 남는다. 수신자를 수정·삭제해도 과거 스냅샷으로 조회한다. cursor는 사용자와 q에 귀속되므로 검색어 변경 시 초기화한다.
+순서는 `sentAt`, 없으면 `failedAt`, 둘 다 없으면 `updatedAt`의 내림차순이며 같은 시각에는 고유 이력 ID 내림차순이다. 수신자를 수정·삭제해도 과거 스냅샷으로 조회한다.
+
+**아직 보내지 않은 수신자도 포함된다.** 완료된 SENT/FAILED 시도와 진행 중인 SENDING 시도에 더해, 아직 차례가 안 온 READY와 결과를 못 받은 SENDING 수신자가 각각 한 줄씩 내려온다. 화면이 일자·템플릿으로 묶어 `성공 N · 실패 N · 미발송 N`을 세고 미발송 명단을 펼쳐 한 명씩 다시 보내려면 전원이 있어야 한다. 아직 보내지 않은 줄은 `sentAt`·`failedAt`이 null이고 `errorCode`·`errorMessage`·`transport`가 비어 있으며, `updatedAt` 자리에 정렬된다.
+
+실패 후 재시도 준비로 READY가 된 사람은 **지난 실패 줄과 지금 대기 줄이 둘 다** 나온다. 중복이 아니라 「지난 실패」와 「지금 대기」라는 서로 다른 두 사실이다. 그래서 `total`은 사람 수가 아니라 줄 수이며, 사람 단위 집계가 필요하면 캠페인의 `recipientCount`/`readyCount`/`sendingCount`/`sentCount`/`failedCount`를 쓴다.
+
+이력 ID는 시도가 있으면 `{campaignId}_{campaignRecipientId}_{attemptId}`, 아직 보내지 않았으면 `{campaignId}_{campaignRecipientId}#pending`이다. `#`은 attemptId(`[A-Za-z0-9_-]{8,128}`)에 쓸 수 없는 문자라 두 규칙이 절대 겹치지 않는다 — 겹치면 같은 사람의 지난 실패 기록이 아무 오류 없이 덮여 사라진다.
+
+`from`/`to`는 기간 필터이며 **RFC3339(시간대 오프셋 필수)** 한 가지만 받는다(예 `2026-09-27T00:00:00+09:00`). `YYYY-MM-DD`는 거절한다 — 서버가 어느 시간대의 하루인지 짐작하면 경계에 걸린 발송이 조용히 옆 날짜로 샌다. 기준 시각은 정렬·묶기와 **같은** 발송시각(`sentAt` → `failedAt` → `updatedAt`)이라 「목록엔 있는데 기간에서 빠진다」가 생기지 않는다. 양끝을 포함하며(from 이상, to 이하) 없으면 전 기간이다. 읽을 수 없는 값이거나 from이 to보다 늦으면 400 `VALIDATION_FAILED`로 사유가 담긴 문장을 돌려준다.
+
+cursor는 사용자·q·기간(from/to)에 귀속되므로 검색어나 기간을 바꾸면 초기화한다.
 
 소규모 도구 범위에서 계정 하위 캠페인과 시도 문서를 함께 조회한다. 별도의 전체 사용자 collection-group 조회를 사용하지 않는다.
 
