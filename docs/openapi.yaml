@@ -321,21 +321,30 @@ paths:
     get:
       tags: [messaging]
       operationId: listSmsHistory
-      summary: 수신자 이름 또는 전화번호 뒷자리로 검색하는 전체 발송이력(아직 보내지 않은 사람 포함)
+      summary: 수신자 이름 또는 전화번호 뒷자리로 검색하는 전체 발송이력(시작된 발송의 미발송자 포함)
       description: >-
-        **아직 보내지 않은 수신자도 포함된다.** SENT·FAILED 완료 시도와 진행 중인 SENDING 시도에 더해,
+        **한 번이라도 시작된 발송(`campaign.startedAt != null`)의 수신자만 내려온다.**
+        예약만 해 두고 아직 한 번도 보내지 않은 캠페인(`startedAt` 이 null)은 시도 줄도 대기 줄도 나오지 않는다 —
+        그 사람들에게는 발송 일자라는 것이 없어서 이력에 넣으면 레코드를 마지막으로 건드린 시각이 발송일인 척 붙는다.
+        예약은 발송이력이 아니라 예약 목록이 맡는다.
+        ⚠️ 가르는 기준은 캠페인 상태가 아니라 `startedAt` 하나다 — 시작했다가 CANCELLED 된 캠페인은
+        그날 실제로 발송을 돌렸고 남은 사람이 못 나간 것이므로 **그대로 포함된다.**
+        시작된 발송 안에서는 **아직 보내지 않은 수신자도 포함된다.** SENT·FAILED 완료 시도와 진행 중인 SENDING 시도에 더해,
         아직 차례가 안 온 READY 와 결과를 못 받은 SENDING 수신자가 각각 한 줄씩 내려온다.
-        화면이 `성공 N · 실패 N · 미발송 N` 을 세고 미발송 명단을 펼쳐 한 명씩 다시 보내려면 전원이 필요하다.
+        화면이 `성공 N · 실패 N · 미발송 N` 을 세고 미발송 명단을 펼쳐 한 명씩 다시 보내려면 그 발송의 전원이 필요하다.
         실패 후 재시도로 READY 가 된 사람은 **지난 실패 줄과 지금 대기 줄이 둘 다** 나온다(중복이 아니라 서로 다른 두 사실).
         따라서 `total` 은 사람 수가 아니라 줄 수다 — 사람 단위 집계는 캠페인의 `readyCount`/`sentCount`/`failedCount` 를 쓴다.
         아직 보내지 않은 줄의 `id` 는 `{campaignId}_{campaignRecipientId}#pending` 이고, 시도가 있는 줄은
         기존대로 `{campaignId}_{campaignRecipientId}_{attemptId}` 다(`#` 은 attemptId 에 쓸 수 없는 문자라 서로 겹치지 않는다).
         아직 보내지 않은 줄은 `sentAt`·`failedAt` 이 null 이고 `errorCode`·`errorMessage`·`transport` 가 비어 있다.
         정렬은 발송시각(`sentAt` → `failedAt` → `updatedAt`) 내림차순 후 고유 ID 내림차순이며,
-        아직 보내지 않은 줄은 `updatedAt` 자리에 놓인다.
+        아직 보내지 않은 줄의 `updatedAt` 에는 **그 발송이 시작된 시각(`campaign.startedAt`)** 이 들어간다.
+        수신자 레코드를 마지막으로 건드린 시각이 아니다 — 그 값은 재시도로 되돌린 순간이나 취소한 순간이라
+        발송과 무관하고, 쓰면 「9월 23일 발송에서 안 나간 사람」이 오늘 자로 조용히 옮겨 간다.
+        따라서 같은 발송의 미발송자는 전부 같은 시각에 모여 하루·발송 단위로 묶인다.
         커서는 사용자·검색어·기간(`from`/`to`)에 귀속되므로 셋 중 하나라도 바뀌면 커서를 버리고 처음부터 조회한다.
         `q` 는 GET /calls 와 **같은 규칙**이다 — 이름 부분일치(대소문자 무시) 또는 전화번호 부분일치(뒷자리 포함),
-        하이픈·공백·괄호·`+82` 표기 차이는 숫자만 남겨 비교한다. 아직 보내지 않은 사람도 같은 규칙으로 검색된다.
+        하이픈·공백·괄호·`+82` 표기 차이는 숫자만 남겨 비교한다. 시작된 발송의 미발송자도 같은 규칙으로 검색된다.
       parameters:
         - in: query
           name: q
@@ -2061,8 +2070,9 @@ components:
         status:
           type: string
           description: >-
-            READY 는 아직 보내지 않은 수신자 줄이며 GET /sms/history 에만 나온다
+            READY 는 시작된 발송에서 아직 보내지 않은 수신자 줄이며 GET /sms/history 에만 나온다
             (GET /recipients/{id}/history 는 결과가 나온 줄만 담는다).
+            예약만 해 두고 시작하지 않은 캠페인의 수신자는 어느 쪽에도 나오지 않는다.
           enum:
           - READY
           - SENDING
