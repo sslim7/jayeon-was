@@ -321,17 +321,40 @@ paths:
     get:
       tags: [messaging]
       operationId: listSmsHistory
-      summary: 수신자 이름 또는 전화번호 뒷자리로 검색하는 전체 발송이력
+      summary: 수신자 이름 또는 전화번호 뒷자리로 검색하는 전체 발송이력(아직 보내지 않은 사람 포함)
       description: >-
-        SENT·FAILED 완료 시도와 현재 SENDING 시도. 발송시각 내림차순 후 고유 ID 내림차순. READY 제외.
-        사용자 및 검색어에 귀속된 커서.
+        **아직 보내지 않은 수신자도 포함된다.** SENT·FAILED 완료 시도와 진행 중인 SENDING 시도에 더해,
+        아직 차례가 안 온 READY 와 결과를 못 받은 SENDING 수신자가 각각 한 줄씩 내려온다.
+        화면이 `성공 N · 실패 N · 미발송 N` 을 세고 미발송 명단을 펼쳐 한 명씩 다시 보내려면 전원이 필요하다.
+        실패 후 재시도로 READY 가 된 사람은 **지난 실패 줄과 지금 대기 줄이 둘 다** 나온다(중복이 아니라 서로 다른 두 사실).
+        따라서 `total` 은 사람 수가 아니라 줄 수다 — 사람 단위 집계는 캠페인의 `readyCount`/`sentCount`/`failedCount` 를 쓴다.
+        아직 보내지 않은 줄의 `id` 는 `{campaignId}_{campaignRecipientId}#pending` 이고, 시도가 있는 줄은
+        기존대로 `{campaignId}_{campaignRecipientId}_{attemptId}` 다(`#` 은 attemptId 에 쓸 수 없는 문자라 서로 겹치지 않는다).
+        아직 보내지 않은 줄은 `sentAt`·`failedAt` 이 null 이고 `errorCode`·`errorMessage`·`transport` 가 비어 있다.
+        정렬은 발송시각(`sentAt` → `failedAt` → `updatedAt`) 내림차순 후 고유 ID 내림차순이며,
+        아직 보내지 않은 줄은 `updatedAt` 자리에 놓인다.
+        커서는 사용자·검색어·기간(`from`/`to`)에 귀속되므로 셋 중 하나라도 바뀌면 커서를 버리고 처음부터 조회한다.
         `q` 는 GET /calls 와 **같은 규칙**이다 — 이름 부분일치(대소문자 무시) 또는 전화번호 부분일치(뒷자리 포함),
-        하이픈·공백·괄호·`+82` 표기 차이는 숫자만 남겨 비교한다.
+        하이픈·공백·괄호·`+82` 표기 차이는 숫자만 남겨 비교한다. 아직 보내지 않은 사람도 같은 규칙으로 검색된다.
       parameters:
         - in: query
           name: q
           description: '이름 또는 전화번호 뒷자리. 없거나 비어 있으면 전체.'
           schema: {type: string, maxLength: 100}
+        - in: query
+          name: from
+          description: >-
+            조회 시작일시. **RFC3339(시간대 오프셋 필수)** 한 가지만 받는다 — 예 `2026-09-27T00:00:00+09:00`.
+            `YYYY-MM-DD` 는 거절한다(서버가 어느 시간대의 하루인지 짐작하면 경계 발송이 조용히 옆 날짜로 샌다).
+            기준 시각은 정렬·묶기와 **같은** 발송시각(`sentAt` → `failedAt` → `updatedAt`)이다.
+            **이 값을 포함**한다(이상). 없으면 전 기간.
+          schema: {type: string, format: date-time, maxLength: 64}
+        - in: query
+          name: to
+          description: >-
+            조회 종료일시. 형식·기준 시각은 `from` 과 같다. **이 값을 포함**한다(이하). 없으면 전 기간.
+            읽을 수 없는 값이거나 `from` 이 `to` 보다 늦으면 400 `VALIDATION_FAILED` 로 사유가 담긴 문장을 돌려준다.
+          schema: {type: string, format: date-time, maxLength: 64}
         - in: query
           name: limit
           schema: {type: integer, minimum: 1, maximum: 100, default: 50}
@@ -2037,7 +2060,11 @@ components:
           - EXTERNAL
         status:
           type: string
+          description: >-
+            READY 는 아직 보내지 않은 수신자 줄이며 GET /sms/history 에만 나온다
+            (GET /recipients/{id}/history 는 결과가 나온 줄만 담는다).
           enum:
+          - READY
           - SENDING
           - SENT
           - FAILED

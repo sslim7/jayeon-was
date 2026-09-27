@@ -72,7 +72,7 @@ func TestExternalSendAtomicIdempotencyHistoryAndAndroidCount(t *testing.T) {
 	if e != nil || len(h) != 1 || h[0].Source != "EXTERNAL" {
 		t.Fatal(h, e)
 	}
-	global, e := s.History(ctx, uid, "홍길동", 50, "")
+	global, e := s.History(ctx, uid, "홍길동", 50, "", "", "")
 	if e != nil || global.Total != 1 || global.Items[0].Source != "EXTERNAL" {
 		t.Fatal(global, e)
 	}
@@ -101,7 +101,7 @@ func TestExternalSendAtomicIdempotencyHistoryAndAndroidCount(t *testing.T) {
 	if e != nil || r.SentCount != 3 {
 		t.Fatal(r, e)
 	}
-	global, e = s.History(ctx, uid, "외부홍길동", 50, "")
+	global, e = s.History(ctx, uid, "외부홍길동", 50, "", "", "")
 	if e != nil || global.Total != 3 || global.Items[0].Source != "ANDROID" || global.Items[1].Source != "EXTERNAL" {
 		t.Fatal(global, e)
 	}
@@ -129,7 +129,7 @@ func TestExternalSendAtomicIdempotencyHistoryAndAndroidCount(t *testing.T) {
 		}
 	}
 	rs.Delete(ctx, uid, r.ID)
-	global, e = s.History(ctx, uid, "외부홍길동", 50, "")
+	global, e = s.History(ctx, uid, "외부홍길동", 50, "", "", "")
 	if e != nil || global.Total != 3 {
 		t.Fatal("삭제후스냅샷", global, e)
 	}
