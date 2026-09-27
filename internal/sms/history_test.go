@@ -68,7 +68,6 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 	failed := at.Add(-time.Minute)
 	sending := at.Add(time.Minute)
 	// 🔴 StartedAt 이 있어야 이력에 들어온다 — 시작한 적 없는 캠페인은 통째로 빠진다.
-	// 대기 줄의 시각은 r.UpdatedAt(sending)이 아니라 이 값(older)이 된다.
 	c := Campaign{ID: "campaign-a", Title: "캠페인 제목", CreatedAt: older, StartedAt: &older}
 	sentRow := CampaignRecipient{ID: "sent", CampaignID: c.ID, RecipientID: "deleted-recipient", Name: "홍길동", Phone: "01012345678", Message: "스냅샷 본문", Status: Sent, AttemptID: "sent-attempt", SentAt: &at, UpdatedAt: sending.Add(time.Hour), CreatedAt: older}
 	retryRow := CampaignRecipient{ID: "retry", CampaignID: c.ID, RecipientID: "same-person", Name: "홍길동", Phone: "01011112222", Message: "스냅샷 본문", Status: Ready, UpdatedAt: sending, CreatedAt: older, Attempts: []Attempt{{ID: "failed-attempt", Status: Failed, StartedAt: older, FinishedAt: &failed}}}
@@ -91,14 +90,15 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 	if _, e = ref.Collection("attempts").Doc("sent-copy").Set(ctx, sentRow); e != nil {
 		t.Fatal(e)
 	}
-	// 아직 보내지 않은 사람도 한 줄씩 들어온다. retry 는 「지난 실패」와 「지금 대기」 두 줄이다.
-	// 대기 줄 두 개는 StartedAt(older)에 모여 맨 뒤로 가고, 같은 시각이라 ID 내림차순으로 갈린다.
-	want := []string{"campaign-a_pending_pending-attempt", "campaign-a_sent_sent-attempt", "campaign-a_retry_failed-attempt", "campaign-a_retry#pending", "campaign-a_never#pending"}
+	// 🔴 이력에는 **실제로 시도가 있었던 사람만** 들어온다. retry(재시도로 READY 가 된 사람)와
+	// never(한 번도 차례가 오지 않은 사람)의 대기 줄은 없다 — 이력은 「보낸 것」의 기록이고, 그
+	// 사람들은 예약 목록이 맡는다. retry 는 「지난 실패」 줄 하나만 남는다.
+	want := []string{"campaign-a_pending_pending-attempt", "campaign-a_sent_sent-attempt", "campaign-a_retry_failed-attempt"}
 	if got := sweepHistory(t, ctx, s, uid, "", "", ""); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatal("정렬/페이징", got)
 	}
 	first, e := s.History(ctx, uid, "", 1, "", "", "")
-	if e != nil || first.Total != 5 || len(first.Items) != 1 || first.Items[0].Status != Sending || first.NextCursor == nil {
+	if e != nil || first.Total != 3 || len(first.Items) != 1 || first.Items[0].Status != Sending || first.NextCursor == nil {
 		t.Fatal(first, e)
 	}
 	second, e := s.History(ctx, uid, "", 1, *first.NextCursor, "", "")
@@ -106,11 +106,28 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 		t.Fatal(second, e)
 	}
 	last, e := s.History(ctx, uid, "", 5, "", "", "")
-	if e != nil || len(last.Items) != 5 || last.Items[2].Status != Failed || last.Items[2].ErrorCode != "NO_SERVICE" || last.Items[4].Status != Ready || last.NextCursor != nil {
+	if e != nil || len(last.Items) != 3 || last.Items[2].Status != Failed || last.Items[2].ErrorCode != "NO_SERVICE" || last.NextCursor != nil {
 		t.Fatal(last, e)
 	}
+	// 🔴 차례가 오지 않은 사람(READY)은 이력에 **나오지 않는다.** 7명 예약에서 1명만 보냈을 때
+	// 나머지 6명이 그날의 「미발송」으로 딸려 들어와 이미 보낸 사람과 한 줄에 섞인 자리가 여기다.
+	// ⚠️ 줄 수만 세면 안 된다 — 다른 줄이 대신 빠져도 같은 숫자가 나온다. 없어야 하는 줄 ID 와
+	// 「어떤 줄도 READY 가 아니다」를 따로 못 박는다.
+	for _, id := range []string{"campaign-a_retry#pending", "campaign-a_never#pending"} {
+		for _, h := range last.Items {
+			if h.ID == id {
+				t.Fatalf("차례가 오지 않은 사람이 이력에 나왔다: %s (%v)", id, h)
+			}
+		}
+	}
+	for _, h := range last.Items {
+		if h.Status == Ready {
+			t.Fatalf("이력에 READY 줄이 있다: %v", h)
+		}
+	}
+	// 「홍길동」은 sent·retry·never 세 사람이지만 never 는 차례가 오지 않아 이력에 없다 → 두 줄.
 	filtered, e := s.History(ctx, uid, " 길동 ", 50, "", "", "")
-	if e != nil || filtered.Total != 4 || len(filtered.Items) != 4 || filtered.Items[0].CampaignTitle != c.Title || filtered.Items[0].Message != "스냅샷 본문" {
+	if e != nil || filtered.Total != 2 || len(filtered.Items) != 2 || filtered.Items[0].CampaignTitle != c.Title || filtered.Items[0].Message != "스냅샷 본문" {
 		t.Fatal(filtered, e)
 	}
 	// 앱의 검색칸이 「이름 또는 폰번호 뒷4자리」라 숫자도 걸려야 한다. 예전에는 이름만 봤다.
@@ -120,7 +137,7 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 		want int
 	}{
 		{"전화번호 뒷4자리", "5678", 1},
-		{"하이픈 표기 — 실패 줄과 대기 줄 둘 다", "1111-2222", 2},
+		{"하이픈 표기 — 지난 실패 줄 하나(대기 줄은 없다)", "1111-2222", 1},
 		{"+82 표기", "+82 10-1234-5678", 1},
 		{"글자+숫자는 둘 다 맞아야 한다", "길동 5678", 1},
 		{"글자가 다르면 번호가 맞아도 불일치", "영희 5678", 0},
@@ -177,7 +194,7 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 		t.Fatal(e)
 	}
 	// 같은 시각 줄이 늘어나도 (시각, ID) 완전순서 그대로 한 번씩만 나와야 한다.
-	tied := []string{"campaign-z_sent_sent-attempt", "campaign-a_sent_sent-attempt", "campaign-a_retry_failed-attempt", "campaign-a_retry#pending", "campaign-a_never#pending"}
+	tied := []string{"campaign-z_sent_sent-attempt", "campaign-a_sent_sent-attempt", "campaign-a_retry_failed-attempt"}
 	if got := sweepHistory(t, ctx, s, uid, "길동", "", ""); strings.Join(got, ",") != strings.Join(tied, ",") {
 		t.Fatal("같은시각 ID 정렬/페이지 유실", got)
 	}
@@ -200,9 +217,9 @@ func TestGlobalHistoryOrderingFilteringAndIsolation(t *testing.T) {
 
 }
 
-// 화면은 「성공 N · 실패 N · 미발송 N」을 세고 미발송 명단을 펼쳐야 한다. 그러려면 아직
-// 보내지 않은 사람도 이력에 있어야 하고, 기간으로 끊을 수 있어야 한다.
-func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
+// 이력은 「보낸 것」의 기록이다. 실제로 시도가 있었던 사람(SENT·FAILED, 그리고 결과를 못 받은
+// SENDING)만 내려오고 아직 차례가 오지 않은 READY 는 빠진다. 그 줄들을 기간으로 끊을 수 있어야 한다.
+func TestHistoryIncludesAttemptedRecipientsAndPeriodFilter(t *testing.T) {
 	if os.Getenv("FIRESTORE_EMULATOR_HOST") == "" {
 		t.Skip("emulator required")
 	}
@@ -213,7 +230,7 @@ func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
 	}
 	defer fs.Close()
 	s := &FirestoreStore{Client: fs}
-	uid := fmt.Sprintf("unsent-history-%d", time.Now().UnixNano())
+	uid := fmt.Sprintf("attempted-history-%d", time.Now().UnixNano())
 	base := time.Now().UTC().Truncate(time.Microsecond)
 	oldFailed := base.Add(-9 * time.Minute)
 	sentAt := base.Add(-time.Hour)
@@ -222,19 +239,26 @@ func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
 	startedAt := base.Add(-30 * time.Minute)
 	c := Campaign{ID: "c1", Title: "기간 캠페인", CreatedAt: sentAt, StartedAt: &startedAt}
 	rows := []CampaignRecipient{
+		// 🔴 차례가 오지 않은 READY. 이 사람은 이력에 나오면 안 된다 — 발송 일자라는 것이 아직
+		// 없고, 예약 목록이 맡는다.
 		{ID: "ready-only", CampaignID: c.ID, RecipientID: "p-ready", Name: "대기자", Phone: "01000000001", Message: "본문", Status: Ready, UpdatedAt: base, CreatedAt: sentAt},
+		// 재시도로 READY 가 된 사람 — 「지난 실패」 줄만 남고 「지금 대기」 줄은 없다.
 		{ID: "retried", CampaignID: c.ID, RecipientID: "p-retry", Name: "재시도자", Phone: "01000000004", Message: "본문", Status: Ready, UpdatedAt: base.Add(time.Minute), CreatedAt: sentAt, Attempts: []Attempt{{ID: "old-attempt-1", Status: Failed, StartedAt: base.Add(-10 * time.Minute), FinishedAt: &oldFailed}}},
 		{ID: "sending-live", CampaignID: c.ID, RecipientID: "p-live", Name: "발송중", Phone: "01000000002", Message: "본문", Status: Sending, AttemptID: "live-attempt-1", UpdatedAt: base.Add(2 * time.Minute), CreatedAt: sentAt},
-		// 결과를 못 받은 채 AttemptID 조차 없는 상태. 예전에는 이 사람이 목록에서 통째로 사라졌다.
+		// ⚠️ 결과를 못 받은 채 AttemptID 조차 없는 상태. 보내려고 잠갔으니 **시도는 실제로 있었고**,
+		// 화면이 「발송중」으로 세워 사람이 풀어 줘야 한다 — 그래서 계속 이력에 나온다.
 		{ID: "sending-blind", CampaignID: c.ID, RecipientID: "p-blind", Name: "발송중무시도", Phone: "01000000003", Message: "본문", Status: Sending, UpdatedAt: base.Add(3 * time.Minute), CreatedAt: sentAt},
+		// 대기 줄이 여럿일 때 전부 StartedAt 한 점에 모이는지 보려면 둘째 줄이 필요하다.
+		// UpdatedAt 을 또 다르게(base+4분) 둔다 — 한 점에 모이는 근거가 UpdatedAt 이 아님을 못 박는다.
+		{ID: "sending-blind-2", CampaignID: c.ID, RecipientID: "p-blind2", Name: "발송중무시도둘", Phone: "01000000006", Message: "본문", Status: Sending, UpdatedAt: base.Add(4 * time.Minute), CreatedAt: sentAt},
 		{ID: "done", CampaignID: c.ID, RecipientID: "p-done", Name: "성공자", Phone: "01000000005", Message: "본문", Status: Sent, AttemptID: "done-attempt-1", SentAt: &sentAt, UpdatedAt: sentAt, CreatedAt: sentAt},
 	}
 	if _, e = s.collection(uid).Doc(c.ID).Set(ctx, document{Campaign: c, Recipients: rows}); e != nil {
 		t.Fatal(e)
 	}
 	all, e := s.History(ctx, uid, "", 50, "", "", "")
-	if e != nil || all.Total != 6 {
-		t.Fatal("전원이 내려와야 한다", all.Total, e)
+	if e != nil || all.Total != 5 {
+		t.Fatal("시도가 있었던 사람만 내려와야 한다", all.Total, e)
 	}
 	byID := map[string]int{}
 	for i, h := range all.Items {
@@ -245,11 +269,10 @@ func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
 		id     string
 		status string
 	}{
-		{"한 번도 안 보낸 READY", "c1_ready-only#pending", Ready},
-		{"재시도로 READY 가 된 사람의 지금 대기 줄", "c1_retried#pending", Ready},
 		{"재시도로 READY 가 된 사람의 지난 실패 줄", "c1_retried_old-attempt-1", Failed},
 		{"시도 중인 SENDING", "c1_sending-live_live-attempt-1", Sending},
 		{"AttemptID 없는 SENDING", "c1_sending-blind#pending", Sending},
+		{"AttemptID 없는 SENDING(둘째)", "c1_sending-blind-2#pending", Sending},
 		{"완료된 SENT", "c1_done_done-attempt-1", Sent},
 	} {
 		i, ok := byID[tc.id]
@@ -260,40 +283,65 @@ func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
 			t.Fatalf("%s 상태가 %s 다", tc.why, all.Items[i].Status)
 		}
 	}
+	// 🔴 사용자가 신고한 자리다. 7명 예약에서 1명만 보냈더니 나머지 6명이 그날의 「미발송」으로
+	// 이력에 딸려 들어와 이미 보낸 사람과 섞였다. 차례가 오지 않은 사람에게는 발송 일자라는 것이
+	// 없으므로 이력에 줄이 서지 않는다 — 그 사람들은 예약 목록이 맡는다.
+	for _, tc := range []struct{ why, id string }{
+		{"한 번도 차례가 오지 않은 READY", "c1_ready-only#pending"},
+		{"재시도로 READY 가 된 사람의 지금 대기 줄", "c1_retried#pending"},
+	} {
+		if i, ok := byID[tc.id]; ok {
+			t.Fatalf("%s 가 이력에 나왔다: %s (%v)", tc.why, tc.id, all.Items[i])
+		}
+	}
+	// ⚠️ ID 만 보면 규칙이 바뀌어 다른 ID 로 들어오는 경우를 놓친다. 상태로도 막는다.
+	for _, h := range all.Items {
+		if h.Status == Ready {
+			t.Fatalf("이력에 READY 줄이 있다: %v", h)
+		}
+	}
 	// 대기 줄은 보낸 흔적을 달고 나오면 안 되고, 시각은 그 발송이 시작된 시각이어야 한다.
-	waiting := all.Items[byID["c1_ready-only#pending"]]
+	waiting := all.Items[byID["c1_sending-blind#pending"]]
 	if waiting.SentAt != nil || waiting.FailedAt != nil || waiting.ErrorCode != "" {
 		t.Fatal("대기 줄에 발송 흔적이 남았다", waiting)
 	}
-	// 🔴 레코드를 건드린 시각(base)이 아니라 발송 시작 시각(startedAt)이다. 되돌아가면
+	// 🔴 레코드를 건드린 시각(base+3분)이 아니라 발송 시작 시각(startedAt)이다. 되돌아가면
 	// 「9월 23일 발송에서 안 나간 사람」이 오늘 자로 묶여 조용히 날짜가 틀어진다.
-	if !waiting.UpdatedAt.Equal(startedAt) || waiting.UpdatedAt.Equal(base) {
-		t.Fatalf("대기 줄 시각이 StartedAt 이 아니다: %v (원한 것 %v, 수신자 UpdatedAt %v)", waiting.UpdatedAt, startedAt, base)
+	if !waiting.UpdatedAt.Equal(startedAt) || waiting.UpdatedAt.Equal(base.Add(3*time.Minute)) {
+		t.Fatalf("대기 줄 시각이 StartedAt 이 아니다: %v (원한 것 %v, 수신자 UpdatedAt %v)", waiting.UpdatedAt, startedAt, base.Add(3*time.Minute))
 	}
 	// 같은 발송의 대기 줄은 전부 같은 시각에 모인다 — 화면이 하루·발송 단위로 묶을 수 있어야 한다.
-	for _, id := range []string{"c1_retried#pending", "c1_sending-blind#pending"} {
+	for _, id := range []string{"c1_sending-blind#pending", "c1_sending-blind-2#pending"} {
 		if got := all.Items[byID[id]].UpdatedAt; !got.Equal(startedAt) {
 			t.Fatalf("%s 시각이 StartedAt 이 아니다: %v", id, got)
 		}
 	}
-	// 재시도자의 두 줄은 같은 사람이지만 ID 가 겹치지 않는다(겹치면 맵에서 하나가 사라진다).
+	// 재시도자는 「지난 실패」 한 줄이다. 지금 대기 상태는 이력이 아니라 예약 목록이 맡는다.
 	retried := 0
 	for _, h := range all.Items {
 		if h.RecipientID == "p-retry" {
 			retried++
 		}
 	}
-	if retried != 2 {
-		t.Fatal("재시도자는 지난 실패 + 지금 대기 두 줄이다", retried)
+	if retried != 1 {
+		t.Fatal("재시도자는 지난 실패 줄 하나다", retried)
 	}
-	// 검색도 같게 적용된다 — 아직 안 보낸 사람이 이름·번호로 찾아져야 한다.
+	// 검색도 같게 적용된다 — 시도가 있었던 사람은 이름·번호로 찾아지고, 차례가 오지 않은 사람은
+	// 🔴 이름으로 찾아도 없다(0건). 검색은 이력에 서 있는 줄만 훑는다.
 	for _, tc := range []struct {
+		why  string
 		q    string
 		want int
-	}{{"대기자", 1}, {"0001", 1}, {"재시도자", 2}, {"발송중", 2}} {
+	}{
+		{"차례가 오지 않은 READY — 이름으로도 없다", "대기자", 0},
+		{"차례가 오지 않은 READY — 번호로도 없다", "0001", 0},
+		{"재시도자는 지난 실패 줄 하나", "재시도자", 1},
+		{"발송중 세 명(시도 있는 하나 + AttemptID 없는 둘)", "발송중", 3},
+		{"성공자", "성공자", 1},
+	} {
 		got, e := s.History(ctx, uid, tc.q, 50, "", "", "")
 		if e != nil || got.Total != tc.want {
-			t.Fatalf("검색 q=%q → %d건 (%v)", tc.q, got.Total, e)
+			t.Fatalf("%s: q=%q → %d건 (%v)", tc.why, tc.q, got.Total, e)
 		}
 	}
 	// 기간은 historyTime 기준이고 양끝을 포함한다.
@@ -307,14 +355,14 @@ func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
 	}{
 		{"from·to 같은 순간 — 양끝 포함이라 그 줄 하나", rfc(oldFailed), rfc(oldFailed), []string{"c1_retried_old-attempt-1"}},
 		{"오프셋 표기가 달라도 같은 순간", kst(oldFailed), kst(oldFailed), []string{"c1_retried_old-attempt-1"}},
-		{"대기 줄은 전부 StartedAt 한 점에 모인다", rfc(startedAt), rfc(startedAt), []string{"c1_sending-blind#pending", "c1_retried#pending", "c1_ready-only#pending"}},
-		{"from 포함", rfc(startedAt), "", []string{"c1_sending-live_live-attempt-1", "c1_retried_old-attempt-1", "c1_sending-blind#pending", "c1_retried#pending", "c1_ready-only#pending"}},
+		{"대기 줄은 전부 StartedAt 한 점에 모인다", rfc(startedAt), rfc(startedAt), []string{"c1_sending-blind-2#pending", "c1_sending-blind#pending"}},
+		{"from 포함", rfc(startedAt), "", []string{"c1_sending-live_live-attempt-1", "c1_retried_old-attempt-1", "c1_sending-blind-2#pending", "c1_sending-blind#pending"}},
 		{"from 을 1마이크로초 올리면 대기 줄이 통째로 빠진다", rfc(startedAt.Add(time.Microsecond)), "", []string{"c1_sending-live_live-attempt-1", "c1_retried_old-attempt-1"}},
-		{"to 포함", "", rfc(oldFailed), []string{"c1_retried_old-attempt-1", "c1_sending-blind#pending", "c1_retried#pending", "c1_ready-only#pending", "c1_done_done-attempt-1"}},
-		{"to 를 1마이크로초 내리면 경계 줄이 빠진다", "", rfc(oldFailed.Add(-time.Microsecond)), []string{"c1_sending-blind#pending", "c1_retried#pending", "c1_ready-only#pending", "c1_done_done-attempt-1"}},
-		// 🔴 수신자 UpdatedAt(base~base+3분)만 걸치는 기간에는 대기 줄이 하나도 없어야 한다.
+		{"to 포함", "", rfc(oldFailed), []string{"c1_retried_old-attempt-1", "c1_sending-blind-2#pending", "c1_sending-blind#pending", "c1_done_done-attempt-1"}},
+		{"to 를 1마이크로초 내리면 경계 줄이 빠진다", "", rfc(oldFailed.Add(-time.Microsecond)), []string{"c1_sending-blind-2#pending", "c1_sending-blind#pending", "c1_done_done-attempt-1"}},
+		// 🔴 수신자 UpdatedAt(base~base+4분)만 걸치는 기간에는 대기 줄이 하나도 없어야 한다.
 		// 여기서 대기 줄이 나오면 historyTime 이 다시 UpdatedAt 으로 돌아간 것이다.
-		{"레코드를 건드린 시각으로는 걸리지 않는다", rfc(base), rfc(base.Add(3 * time.Minute)), []string{"c1_sending-live_live-attempt-1"}},
+		{"레코드를 건드린 시각으로는 걸리지 않는다", rfc(base), rfc(base.Add(4 * time.Minute)), []string{"c1_sending-live_live-attempt-1"}},
 		{"기간 밖", rfc(base.Add(time.Hour)), rfc(base.Add(2 * time.Hour)), []string{}},
 	} {
 		got := sweepHistory(t, ctx, s, uid, "", tc.from, tc.to)
@@ -323,7 +371,7 @@ func TestHistoryIncludesUnsentRecipientsAndPeriodFilter(t *testing.T) {
 		}
 	}
 	// 기간을 준 채로도 커서가 빠짐·겹침 없이 끝까지 돈다.
-	if got := sweepHistory(t, ctx, s, uid, "", rfc(sentAt), rfc(base.Add(3*time.Minute))); len(got) != 6 {
+	if got := sweepHistory(t, ctx, s, uid, "", rfc(sentAt), rfc(base.Add(4*time.Minute))); len(got) != 5 {
 		t.Fatal("기간 + 커서 페이징", got)
 	}
 	// ⚠️ 커서는 기간에도 귀속된다. 기간만 바꾸고 커서를 재사용하면 앞 페이지가 다른 집합에서
@@ -403,26 +451,32 @@ func TestHistoryOnlyIncludesStartedCampaigns(t *testing.T) {
 	cancelStartedAt := base.Add(-time.Hour)
 	cancelSentAt := cancelStartedAt.Add(time.Minute)
 
-	// 예약만 걸어 둔 캠페인 — StartedAt 이 없다. 이 두 사람은 이력에 나오면 안 된다.
+	// 예약만 걸어 둔 캠페인 — StartedAt 이 없다. 이 세 사람은 이력에 나오면 안 된다.
 	reserved := Campaign{ID: "s-reserved", Title: "예약만", Status: Ready, Reserved: true, CreatedAt: base.Add(-3 * time.Hour), UpdatedAt: base}
 	reservedRows := []CampaignRecipient{
 		{ID: "never-1", CampaignID: reserved.ID, RecipientID: "p-n1", Name: "예약대기갑", Phone: "01000000011", Message: "본문", Status: Ready, UpdatedAt: base, CreatedAt: base.Add(-3 * time.Hour)},
 		{ID: "never-2", CampaignID: reserved.ID, RecipientID: "p-n2", Name: "예약대기을", Phone: "01000000012", Message: "본문", Status: Ready, UpdatedAt: base, CreatedAt: base.Add(-3 * time.Hour)},
+		// ⚠️ 상태만 보면 이력에 들어올 조건(AttemptID 없는 SENDING)을 갖춘 줄이다. 데이터가
+		// 그렇게 어긋나 있어도 시작된 적 없는 캠페인이면 빠져야 한다 — READY 를 거르는 규칙이
+		// 아니라 **StartedAt 게이트**가 이 줄을 막는다는 것을 이 한 줄이 증명한다.
+		{ID: "never-blind", CampaignID: reserved.ID, RecipientID: "p-n3", Name: "예약잠김", Phone: "01000000013", Message: "본문", Status: Sending, UpdatedAt: base, CreatedAt: base.Add(-3 * time.Hour)},
 	}
 	if _, e = s.collection(uid).Doc(reserved.ID).Set(ctx, document{Campaign: reserved, Recipients: reservedRows}); e != nil {
 		t.Fatal(e)
 	}
-	// 시작해서 아직 도는 중인 캠페인 — 완료 시도 줄과 대기 줄이 둘 다 나온다.
+	// 시작해서 아직 도는 중인 캠페인 — 완료 시도 줄과 대기 줄(AttemptID 없는 SENDING)이 나온다.
+	// 🔴 차례가 오지 않은 r-wait(READY)은 시작된 발송 안에서도 나오지 않는다.
 	started := Campaign{ID: "s-started", Title: "진행중", Status: Sending, CreatedAt: startedAt, UpdatedAt: base, StartedAt: &startedAt}
 	startedRows := []CampaignRecipient{
 		{ID: "r-wait", CampaignID: started.ID, RecipientID: "p-w", Name: "진행대기자", Phone: "01000000021", Message: "본문", Status: Ready, UpdatedAt: base, CreatedAt: startedAt},
 		{ID: "r-sent", CampaignID: started.ID, RecipientID: "p-s", Name: "진행성공자", Phone: "01000000022", Message: "본문", Status: Sent, AttemptID: "s-attempt-1", SentAt: &startedSentAt, UpdatedAt: base, CreatedAt: startedAt},
+		{ID: "r-blind", CampaignID: started.ID, RecipientID: "p-b", Name: "진행발송중", Phone: "01000000023", Message: "본문", Status: Sending, UpdatedAt: base, CreatedAt: startedAt},
 	}
 	if _, e = s.collection(uid).Doc(started.ID).Set(ctx, document{Campaign: started, Recipients: startedRows}); e != nil {
 		t.Fatal(e)
 	}
-	// ⚠️ 시작했다가 취소한 캠페인 — 그날 실제로 발송을 돌렸고 남은 사람이 못 나갔다.
-	// 그 날짜의 「미발송」이 맞으므로 CANCELLED 라는 이유로 빼면 안 된다.
+	// ⚠️ 시작했다가 취소한 캠페인 — 그날 실제로 발송을 돌렸으므로 그때 나간 사람은 이력에 남는다.
+	// CANCELLED 라는 이유로 빼면 안 된다. 못 나간 c-left(READY)는 예약 목록이 맡는다.
 	cancelled := Campaign{ID: "s-cancelled", Title: "돌리다취소", Status: Cancelled, CreatedAt: cancelStartedAt, UpdatedAt: base, StartedAt: &cancelStartedAt}
 	cancelledRows := []CampaignRecipient{
 		{ID: "c-left", CampaignID: cancelled.ID, RecipientID: "p-l", Name: "취소남은자", Phone: "01000000031", Message: "본문", Status: Ready, UpdatedAt: base, CreatedAt: cancelStartedAt},
@@ -436,30 +490,49 @@ func TestHistoryOnlyIncludesStartedCampaigns(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	want := []string{"s-cancelled_c-sent_c-attempt-1", "s-cancelled_c-left#pending", "s-started_r-sent_s-attempt-1", "s-started_r-wait#pending"}
+	want := []string{"s-cancelled_c-sent_c-attempt-1", "s-started_r-sent_s-attempt-1", "s-started_r-blind#pending"}
 	got := []string{}
 	for _, h := range all.Items {
 		got = append(got, h.ID)
 	}
 	if all.Total != len(want) || strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("시작된 발송만 나와야 한다: %v (원한 것 %v)", got, want)
+		t.Fatalf("시작된 발송에서 시도가 있었던 사람만 나와야 한다: %v (원한 것 %v)", got, want)
 	}
-	// 🔴 예약만 해 둔 사람은 이름으로 찾아도 없어야 한다 — 화면의 예약 목록이 맡는 사람들이다.
-	for _, q := range []string{"예약대기갑", "0011", "예약대기을"} {
+	// 🔴 예약만 해 둔 사람은 이름·번호로 찾아도 없어야 한다 — 화면의 예약 목록이 맡는 사람들이다.
+	// 「예약잠김」은 상태가 SENDING 이라 조건만 보면 들어올 뻔했다. StartedAt 게이트가 막는다.
+	for _, q := range []string{"예약대기갑", "0011", "예약대기을", "예약잠김", "0013"} {
 		page, e := s.History(ctx, uid, q, 50, "", "", "")
 		if e != nil || page.Total != 0 {
-			t.Fatalf("예약만 한 사람이 이력에 나왔다: q=%q → %d건 (%v)", q, page.Total, e)
+			t.Fatalf("시작된 적 없는 발송의 사람이 이력에 나왔다: q=%q → %d건 (%v)", q, page.Total, e)
+		}
+	}
+	// 🔴 시작된 발송 안에서도 차례가 오지 않은 사람(READY)은 이력에 나오지 않는다. 사용자가
+	// 신고한 자리다 — 7명 중 1명만 보냈는데 나머지가 그날의 「미발송」으로 섞여 들어왔다.
+	for _, q := range []string{"진행대기자", "0021", "취소남은자", "0031"} {
+		page, e := s.History(ctx, uid, q, 50, "", "", "")
+		if e != nil || page.Total != 0 {
+			t.Fatalf("차례가 오지 않은 사람이 이력에 나왔다: q=%q → %d건 (%v)", q, page.Total, e)
 		}
 	}
 	byID := map[string]recipients.History{}
 	for _, h := range all.Items {
 		byID[h.ID] = h
 	}
+	for _, id := range []string{"s-started_r-wait#pending", "s-cancelled_c-left#pending"} {
+		if h, ok := byID[id]; ok {
+			t.Fatalf("READY 대기 줄이 살아 있다: %s (%v)", id, h)
+		}
+	}
+	for _, h := range all.Items {
+		if h.Status == Ready {
+			t.Fatalf("이력에 READY 줄이 있다: %v", h)
+		}
+	}
 	// 🔴 대기 줄의 시각은 그 발송이 시작된 시각이다. 수신자 UpdatedAt(base)이 아니다.
 	for _, tc := range []struct {
 		id   string
 		want time.Time
-	}{{"s-started_r-wait#pending", startedAt}, {"s-cancelled_c-left#pending", cancelStartedAt}} {
+	}{{"s-started_r-blind#pending", startedAt}} {
 		h := byID[tc.id]
 		if !h.UpdatedAt.Equal(tc.want) || h.UpdatedAt.Equal(base) {
 			t.Fatalf("%s 시각이 StartedAt 이 아니다: %v (원한 것 %v, 수신자 UpdatedAt %v)", tc.id, h.UpdatedAt, tc.want, base)
@@ -467,7 +540,7 @@ func TestHistoryOnlyIncludesStartedCampaigns(t *testing.T) {
 		if h.SentAt != nil || h.FailedAt != nil {
 			t.Fatalf("%s 는 나가지도 실패하지도 않았다: %v", tc.id, h)
 		}
-		if h.Status != Ready {
+		if h.Status != Sending {
 			t.Fatalf("%s 상태가 %s 다", tc.id, h.Status)
 		}
 	}
@@ -479,8 +552,8 @@ func TestHistoryOnlyIncludesStartedCampaigns(t *testing.T) {
 		to   string
 		want []string
 	}{
-		{"취소된 발송이 일어난 구간", rfc(cancelStartedAt), "", []string{"s-cancelled_c-sent_c-attempt-1", "s-cancelled_c-left#pending"}},
-		{"시작 시각 하나에 걸리는 대기 줄", rfc(startedAt), rfc(startedAt), []string{"s-started_r-wait#pending"}},
+		{"취소된 발송이 일어난 구간", rfc(cancelStartedAt), "", []string{"s-cancelled_c-sent_c-attempt-1"}},
+		{"시작 시각 하나에 걸리는 대기 줄", rfc(startedAt), rfc(startedAt), []string{"s-started_r-blind#pending"}},
 		{"레코드를 건드린 시각으로는 아무것도 안 걸린다", rfc(base), "", []string{}},
 	} {
 		if swept := sweepHistory(t, ctx, s, uid, "", tc.from, tc.to); strings.Join(swept, ",") != strings.Join(tc.want, ",") {
